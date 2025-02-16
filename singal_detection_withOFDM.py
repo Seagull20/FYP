@@ -12,41 +12,41 @@ Callback = keras.callbacks.Callback
 import matplotlib.pyplot as plt
 
 class BCP(Callback):
-    def __init__(self):
+    def __init__(self, dataset_type="default"):
         super(BCP, self).__init__()
-        self.batch_accuracy = []  # 改为实例变量
-        self.batch_loss = []       # 改为实例变量
-        self.epoch_loss = []      # 新增epoch级记录
-        self.epoch_bit_err = []   # 新增epoch级记录
-    
+        self.batch_accuracy = []
+        self.batch_loss = []
+        self.epoch_loss = []
+        self.epoch_bit_err = []
+        self.filename_prefix = dataset_type  # 通过参数设置数据集类型前缀
+
     def on_train_batch_end(self, batch, logs=None):
         logs = logs or {}
         self.batch_accuracy.append(logs.get('bit_err', 0))
         self.batch_loss.append(logs.get('loss', 0))
-    
+
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
         self.epoch_loss.append(logs.get('loss', 0))
         self.epoch_bit_err.append(logs.get('bit_err', 0))
-    
+
     def on_train_end(self, logs=None):
         self.plot_learning_curve()
-    
+
     def plot_learning_curve(self):
-        # 创建画布
         plt.figure(figsize=(12, 5))
-        
-        # Batch级别的曲线
+
+        # Batch-Level Curve
         plt.subplot(1, 2, 1)
         plt.plot(self.batch_loss, label='Training Loss')
-        plt.plot(np.linspace(0, len(self.batch_loss), len(self.epoch_bit_err)), self.epoch_bit_err, 
-                label='Bit Error Rate', color='red', alpha=0.6)
+        plt.plot(np.linspace(0, len(self.batch_loss), len(self.epoch_bit_err)), self.epoch_bit_err,
+                 label='Bit Error Rate', color='red', alpha=0.6)
         plt.title('Batch-Level Learning Curve')
         plt.xlabel('Batch Index')
         plt.ylabel('Metric Value')
         plt.legend()
-        
-        # Epoch级别的曲线
+
+        # Epoch-Level Curve
         plt.subplot(1, 2, 2)
         plt.plot(self.epoch_loss, label='Training Loss')
         plt.plot(self.epoch_bit_err, label='Bit Error Rate')
@@ -54,11 +54,14 @@ class BCP(Callback):
         plt.xlabel('Epoch')
         plt.ylabel('Average Metric')
         plt.legend()
-        
+
         plt.tight_layout()
-        plt.savefig('learning_curve.png')  # 保存图像
+        
+        filename = f"{self.filename_prefix}_learning_curve.png"
+        plt.savefig(filename)  # Save file with dataset type prefix
         plt.close()
-        print("\nLearning curve saved to learning_curve.png")
+        print(f"\nLearning curve saved to {filename}")
+
 
 class signal_simulator():
     def __init__(self, SNR=10):
@@ -213,16 +216,15 @@ class DNN(base_models):
         )
     
     def train(self, x_train, y_train, epochs=10, batch_size=32, 
-             validation_data=None, callbacks=None):
-        
-        # 设置默认回调（保留原有回调功能）
-        final_callbacks = [BCP()]  # 默认包含我们的回调
+          validation_data=None, callbacks=None, dataset_type="default"):
+
+        final_callbacks = [BCP(dataset_type)]  # 传递数据集类型作为前缀
         if callbacks:
             if isinstance(callbacks, list):
                 final_callbacks.extend(callbacks)
             else:
                 final_callbacks.append(callbacks)
-        
+
         return self.fit(
             x_train,
             y_train,
@@ -230,8 +232,9 @@ class DNN(base_models):
             batch_size=batch_size,
             validation_data=validation_data,
             callbacks=final_callbacks,
-            verbose=1  # 显示进度条
+            verbose=1
         )
+
 
 if __name__ == "__main__":
         # 初始化信号模拟器
@@ -249,5 +252,6 @@ if __name__ == "__main__":
         y_train,
         epochs=4,
         batch_size=32,
-        validation_data=(x_test, y_test)
+        validation_data=(x_test, y_test),
+        dataset_type="awgn"
     )

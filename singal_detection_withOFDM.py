@@ -118,7 +118,31 @@ class signal_simulator():
         ofdm_demodulation = self.dft(ofdm_rx_no_cp)
         return np.concatenate((np.real(ofdm_demodulation), np.imag(ofdm_demodulation)))
     
-    def generate_training_dataset(self, channel_type, bits_array):
+    def generate_mixed_dataset(self, channel_types, bits_array, mode="mixed_random"):
+        num_types = len(channel_types)
+        samples_per_type = len(bits_array) // num_types
+        mixed_samples = []
+        mixed_bits = []
+
+        for i, channel in enumerate(channel_types):
+            start_idx = i * samples_per_type
+            end_idx = (i + 1) * samples_per_type if i != num_types - 1 else len(bits_array)
+            for bits in bits_array[start_idx:end_idx]:
+                ofdm_simulate_output = self.ofdm_simulate(bits, channel)
+                mixed_samples.append(ofdm_simulate_output)
+                mixed_bits.append(bits)
+
+        if mode == "mixed_random":
+            combined = list(zip(mixed_samples, mixed_bits))
+            np.random.shuffle(combined)
+            mixed_samples, mixed_bits = zip(*combined)
+
+        return np.asarray(mixed_samples), np.asarray(mixed_bits)
+
+    def generate_training_dataset(self, channel_type, bits_array, mode="mixed_sequential"):
+        if isinstance(channel_type, list):
+            return self.generate_mixed_dataset(channel_type, bits_array, mode=mode)
+        
         training_sample = []
 
         for bits in bits_array:  # 直接迭代 bit 数组
@@ -127,8 +151,12 @@ class signal_simulator():
         
         return np.asarray(training_sample), bits_array
     
-    def generate_testing_dataset(self, channel_type, num_samples):
+    def generate_testing_dataset(self, channel_type, num_samples, mode="mixed_sequential"):
         bits_array = self.generate_bits(num_samples)
+        if isinstance(channel_type, list):
+            return self.generate_mixed_dataset(channel_type, bits_array, mode=mode)
+
+        
         testing_sample = []
 
         for bits in bits_array:  # 直接迭代 bit 数组
@@ -192,7 +220,7 @@ class base_models(Model):
         self.layer2 = layers.Dense(512, activation='relu')
         self.dropout = layers.Dropout(0.2)
         self.layer3 = layers.Dense(256, activation='relu')
-        self.output_layer = layers.Dense(payloadBits_per_OFDM, activation='tanh')
+        self.output_layer = layers.Dense(payloadBits_per_OFDM, activation='sigmoid')
         
     def call(self, inputs, training=False):  # 确保 Dropout 层生效
         x = self.layer1(inputs) 
@@ -237,21 +265,54 @@ class DNN(base_models):
 
 
 if __name__ == "__main__":
-        # 初始化信号模拟器
+    # 初始化信号模拟器
     simulator = signal_simulator()
 
     bits = simulator.generate_bits(100000)
     # 生成数据集
-    x_train, y_train = simulator.generate_training_dataset("awgn",bits) #channel_type, bits
-    x_test, y_test = simulator.generate_testing_dataset("awgn", 2500) #channel_type, num_samples
+    channel_type = ["rician", "awgn", "rayleigh"]  # 正确的格式
+    x_train, y_train = simulator.generate_training_dataset(channel_type,bits,"mixed_sequential") #channel_type, bits
+    x_test, y_test = simulator.generate_testing_dataset(channel_type, 2500,"mixed_sequential") #channel_type, num_samples
 
     # 创建并训练模型
     model = DNN(input_dim=x_train.shape[1], payloadBits_per_OFDM = simulator.payloadBits_per_OFDM)
     history = model.train(
         x_train, 
         y_train,
-        epochs=4,
+        epochs=10,
         batch_size=32,
         validation_data=(x_test, y_test),
-        dataset_type="awgn"
+        dataset_type="mixed_sequential"
     )
+
+    #     # 初始化信号模拟器
+    # simulator = signal_simulator()
+
+    # # 生成相同的 bits_array 用于两个模式
+    # num_samples = 12
+    # bits_array = simulator.generate_bits(num_samples)
+
+    # # 设定信道类型列表
+    # channel_types = ["rician", "awgn", "rayleigh"]
+
+    # # 生成 mixed_sequential 数据集
+    # x_seq, y_seq = simulator.generate_mixed_dataset(channel_types, bits_array, mode="mixed_sequential")
+
+    # # 生成 mixed_random 数据集
+    # x_rand, y_rand = simulator.generate_mixed_dataset(channel_types, bits_array, mode="mixed_random")
+
+    # # 打印 mixed_sequential 分布
+    # print("=== Mixed Sequential (按顺序排列) ===")
+    # for i in range(num_samples):
+    #     print(f"Sample {i}: Channel = {channel_types[i // (num_samples // len(channel_types))]}")
+
+    # # 打印 mixed_random 分布
+    # print("\n=== Mixed Random (随机排列) ===")
+    # for i, bits in enumerate(y_rand):
+    #     match_idx = np.where((bits_array == bits).all(axis=1))[0]  # 找到 bits 在 bits_array 中的位置
+    #     if match_idx.size > 0:
+    #         channel_index = match_idx[0] // (num_samples // len(channel_types))
+    #         print(f"Sample {i}: Channel = {channel_types[channel_index]}")
+    #     else:
+    #         print(f"Sample {i}: Channel = Unknown (Possible mismatch)")
+

@@ -1,6 +1,7 @@
+from enum import auto
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-from global_parameters import *
+from global_parameters import *  # 假设包含 K, P, mu, CP, num_path, rician_factor, pilot_value, mapping_table 等
 import numpy as np
 from numpy import sum, isrealobj, sqrt
 from numpy.random import standard_normal
@@ -15,7 +16,7 @@ import matplotlib.pyplot as plt
 class MultiModelBCP(Callback):
     def __init__(self, model_name, dataset_type="default"):
         super(MultiModelBCP, self).__init__()
-        self.model_name = model_name  # 模型唯一标识符
+        self.model_name = model_name
         self.dataset_type = dataset_type
         if not hasattr(MultiModelBCP, "all_models_data"):
             MultiModelBCP.all_models_data = {}
@@ -50,6 +51,29 @@ class MultiModelBCP(Callback):
         }
 
     @staticmethod
+    def log_manual_data(model_name, epoch_loss, val_bit_err, dataset_type="meta"):
+        """Record MetaDNN metrics - handles both single values and lists"""
+        # Convert inputs to lists if they're not already
+        if isinstance(epoch_loss, (tf.Tensor, np.ndarray)):
+            epoch_loss = epoch_loss.numpy() if hasattr(epoch_loss, 'numpy') else epoch_loss
+        epoch_loss_list = epoch_loss if isinstance(epoch_loss, list) else [epoch_loss]
+        
+        if isinstance(val_bit_err, (tf.Tensor, np.ndarray)):
+            val_bit_err = val_bit_err.numpy() if hasattr(val_bit_err, 'numpy') else val_bit_err
+        val_bit_err_list = val_bit_err if isinstance(val_bit_err, list) else [val_bit_err]
+        
+        MultiModelBCP.all_models_data[model_name] = {
+            "batch_loss": [],
+            "batch_bit_err": [],
+            "epoch_loss": epoch_loss_list,
+            "epoch_bit_err": [],
+            "val_epoch_loss": [],
+            "val_epoch_bit_err": val_bit_err_list,
+            "dataset_type": dataset_type
+        }
+        print(f"Logged {len(epoch_loss_list)} loss values and {len(val_bit_err_list)} validation error values for {model_name}")
+
+    @staticmethod
     def plot_all_learning_curves(save_path="multi_model_learning_curve.png", 
                                  plot_batch=True, plot_epoch=True, plot_train_bit_err=False):
         if not MultiModelBCP.all_models_data:
@@ -63,27 +87,27 @@ class MultiModelBCP(Callback):
         plt.figure(figsize=(6 * num_plots, 5))
 
         plot_idx = 1
-        # Batch-Level Curve
         if plot_batch:
             plt.subplot(1, num_plots, plot_idx)
             for model_name, data in MultiModelBCP.all_models_data.items():
-                plt.plot(data["batch_loss"], label=f"{model_name} Loss")
-                plt.plot(np.linspace(0, len(data["batch_loss"]), len(data["epoch_bit_err"])),
-                         data["epoch_bit_err"], label=f"{model_name} Bit Err", alpha=0.6)
-            plt.title("Batch-Level Learning Curves")
+                if data["batch_loss"]:
+                    plt.plot(data["batch_loss"], label=f"{model_name} Loss")
+                    plt.plot(np.linspace(0, len(data["batch_loss"]), len(data["epoch_bit_err"])),
+                             data["epoch_bit_err"], label=f"{model_name} Bit Err", alpha=0.6)
+            plt.title("Batch-Level Learning Curves (Train Phase)")
             plt.xlabel("Batch Index")
             plt.ylabel("Metric Value")
             plt.legend()
             plot_idx += 1
 
-        # Simplified Epoch-Level Curve
         if plot_epoch:
             plt.subplot(1, num_plots, plot_idx)
             for model_name, data in MultiModelBCP.all_models_data.items():
-                plt.plot(data["val_epoch_bit_err"], label=f"{model_name} Val Bit Err")
-                if plot_train_bit_err:
+                plt.plot(data["val_epoch_bit_err"], label=f"{model_name} Val Bit Err",
+                         marker='o' if len(data["val_epoch_bit_err"]) == 1 else None)
+                if plot_train_bit_err and data["epoch_bit_err"]:
                     plt.plot(data["epoch_bit_err"], label=f"{model_name} Bit Err", linestyle="--")
-            plt.title("Epoch-Level Learning Curves")
+            plt.title("Epoch-Level Learning Curves (Train + Generalization)")
             plt.xlabel("Epoch")
             plt.ylabel("Bit Error Rate")
             plt.legend()
@@ -97,7 +121,7 @@ class MultiModelBCP(Callback):
     def clear_data():
         MultiModelBCP.all_models_data = {}
 
-# signal_simulator 类（保持不变）
+# signal_simulator 类
 class signal_simulator():
     def __init__(self, SNR=10):
         self.all_carriers = np.arange(K)
@@ -136,6 +160,8 @@ class signal_simulator():
             index = np.random.choice(np.arange(train_size), size=1)
             h = self.channel_3gpp[index]
             channel = h[:, 0]
+        elif self.channel_type == "random_mixed" or self.channel_type == "sequential_mixed":
+            return transmit_signals  # 混合信道在 generate_mixed_dataset 中处理
         else:
             raise ValueError("Invalid channel type")
         
@@ -173,8 +199,11 @@ class signal_simulator():
 
         return np.asarray(mixed_samples), np.asarray(mixed_bits)
 
-    def generate_training_dataset(self, channel_type, bits_array, mode="mixed_sequential"):
-        if isinstance(channel_type, list):
+    def generate_training_dataset(self, channel_type, bits_array, mode="sequential_mixed"):
+        if isinstance(channel_type, list) or channel_type in ["random_mixed", "sequential_mixed"]:
+            if channel_type in ["random_mixed", "sequential_mixed"]:
+                channel_types = ["rician", "awgn", "rayleigh"]  # 默认混合信道类型
+                return self.generate_mixed_dataset(channel_types, bits_array, mode=channel_type)
             return self.generate_mixed_dataset(channel_type, bits_array, mode=mode)
         
         training_sample = []
@@ -184,9 +213,12 @@ class signal_simulator():
         
         return np.asarray(training_sample), bits_array
     
-    def generate_testing_dataset(self, channel_type, num_samples, mode="mixed_sequential"):
+    def generate_testing_dataset(self, channel_type, num_samples, mode="sequential_mixed"):
         bits_array = self.generate_bits(num_samples)
-        if isinstance(channel_type, list):
+        if isinstance(channel_type, list) or channel_type in ["random_mixed", "sequential_mixed"]:
+            if channel_type in ["random_mixed", "sequential_mixed"]:
+                channel_types = ["rician", "awgn", "rayleigh"]
+                return self.generate_mixed_dataset(channel_types, bits_array, mode=channel_type)
             return self.generate_mixed_dataset(channel_type, bits_array, mode=mode)
         
         testing_sample = []
@@ -244,18 +276,20 @@ def bit_err(y_true, y_pred):
 class base_models(Model):
     def __init__(self, input_dim, payloadBits_per_OFDM):
         super(base_models, self).__init__()
-        self.layer1 = layers.Dense(256, activation='relu', input_shape=(input_dim,))
-        self.layer2 = layers.Dense(512, activation='relu')
-        self.dropout = layers.Dropout(0.2)
-        self.layer3 = layers.Dense(256, activation='relu')
-        self.output_layer = layers.Dense(payloadBits_per_OFDM, activation='sigmoid')
+        self.input_dim = input_dim
+        self.output_dim = payloadBits_per_OFDM
+        
+        # 使用Sequential定义模型
+        self.model = keras.Sequential([
+            layers.Dense(256, activation='relu', input_shape=(input_dim,)),
+            layers.Dense(512, activation='relu'),
+            layers.Dropout(0.2),
+            layers.Dense(256, activation='relu'),
+            layers.Dense(payloadBits_per_OFDM, activation='sigmoid')
+        ])
         
     def call(self, inputs, training=False):
-        x = self.layer1(inputs) 
-        x = self.layer2(x)
-        x = self.dropout(x, training=training)
-        x = self.layer3(x)
-        return self.output_layer(x)
+        return self.model(inputs, training=training)
 
 class DNN(base_models):
     def __init__(self, input_dim, payloadBits_per_OFDM):
@@ -282,39 +316,170 @@ class DNN(base_models):
             batch_size=batch_size,
             validation_data=validation_data,
             callbacks=final_callbacks,
-            verbose=1
+            verbose="auto"
         )
+
+class MetaDNN(base_models):
+    def __init__(self, input_dim, payloadBits_per_OFDM, inner_lr=0.01, meta_lr=0.001):
+        super(MetaDNN, self).__init__(input_dim, payloadBits_per_OFDM)
+        self.inner_lr = inner_lr
+        self.meta_lr = meta_lr
+        self.optimizer = tf.keras.optimizers.SGD(inner_lr)
+        self.all_epoch_losses = []
+        self.all_val_bit_errs = []
+    
+    def get_params(self):
+        return self.get_weights()
+    
+    def set_params(self, params):
+        self.set_weights(params)
+    
+    def clone(self):
+        model_copy = MetaDNN(self.input_dim, self.output_dim, self.inner_lr, self.meta_lr)
+        model_copy.set_params(self.get_params())
+        return model_copy
+    
+    def inner_update(self, x_task, y_task, steps=3):
+        model_copy = self.clone()
+        losses=[]
+
+        for _ in range(steps):
+            with tf.GradientTape() as tape:
+                preds = model_copy(x_task, training=True)
+                loss = tf.keras.losses.mean_squared_error(y_task, preds)
+                losses.append(tf.reduce_mean(loss))
+            grads = tape.gradient(loss, model_copy.trainable_variables)
+            self.optimizer.apply_gradients(zip(grads, model_copy.trainable_variables))
+        return model_copy, tf.reduce_mean(losses)
+    
+    def evaluate(self, x_val, y_val):
+        preds = self(x_val, training=False)
+        return bit_err(y_val, preds).numpy()
+    
+    def train_reptile(self, tasks, meta_epochs=10, inner_steps=3, meta_validation_data=None):
+        for epoch in range(meta_epochs):
+            frac_done = epoch/meta_epochs
+            current_meta_lr = (1-frac_done) * self.meta_lr 
+            task_losses = []
+
+            initial_params = self.get_params()
+            meta_grads = [tf.zeros_like(p) for p in initial_params]
+            for x_task, y_task in tasks:
+                updated_model, task_loss = self.inner_update(x_task, y_task, inner_steps)
+                task_losses.append(task_loss)
+                updated_params = updated_model.get_params()
+                for i, (init_p, upd_p) in enumerate(zip(initial_params, updated_params)):
+                    meta_grads[i] += (upd_p - init_p)
+            new_params = []
+            for init_p, grad in zip(initial_params, meta_grads):
+                new_params.append(init_p + current_meta_lr * grad / len(tasks))
+            self.set_params(new_params)
+
+            epoch_loss = tf.reduce_mean(task_losses)
+            self.all_epoch_losses.append(epoch_loss)
+            val_bit_err = self.evaluate(*meta_validation_data)
+            self.all_val_bit_errs.append(val_bit_err)
+            if meta_validation_data is not None and ((epoch + 1) % 50 == 0) :
+                print(f"Meta Epoch {epoch + 1}/{meta_epochs} completed, epoch_loss : {epoch_loss.numpy()}, val_bit_err : {val_bit_err}")
+            else:
+                print(f"Meta Epoch {epoch + 1}/{meta_epochs} completed")
+    
+    def fine_tune(self, x_train, y_train, steps=1):
+        """在 3GPP 数据上微调"""
+        for _ in range(steps):
+            with tf.GradientTape() as tape:
+                preds = self(x_train, training=True)
+                loss = tf.keras.losses.mean_squared_error(y_train, preds)
+            grads = tape.gradient(loss, self.trainable_variables)
+            self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
+        return self.evaluate(x_train, y_train)
 
 if __name__ == "__main__":
     simulator = signal_simulator()
-    channel_types = ["rician", "awgn", "rayleigh"]
+    channel_types = ["awgn", "rician", "rayleigh", "sequential_mixed"]
+    meta_channel_types = ["awgn", "rician", "rayleigh"]
     models = {}
     histories = {}
 
-    bits = simulator.generate_bits(100000)
+    # 生成训练数据
+    bits = simulator.generate_bits(10000)
     MultiModelBCP.clear_data()
 
-    for channel in channel_types:
-        x_train, y_train = simulator.generate_training_dataset(channel, bits)
-        x_test, y_test = simulator.generate_testing_dataset(channel, 2500)
+    # Train 阶段
+    # print("=== Train Phase ===")
+    # for channel in channel_types:
+        
+    #     x_train, y_train = simulator.generate_training_dataset(channel, bits)
+    #     x_test, y_test = simulator.generate_testing_dataset(channel, 2500)
+    #     model_name = f"DNN_{channel}"
+    #     models[model_name] = DNN(
+    #         input_dim=x_train.shape[1],
+    #         payloadBits_per_OFDM=simulator.payloadBits_per_OFDM
+    #     )
+    #     print(f"\nTraining on {channel} channel...")
+    #     histories[model_name] = models[model_name].train(
+    #         x_train, y_train,
+    #         epochs=10, batch_size=32,
+    #         validation_data=(x_test, y_test),
+    #         dataset_type=channel
+    #     )
 
-        model_name = f"DNN_{channel}"
-        models[model_name] = DNN(
-            input_dim=x_train.shape[1],
-            payloadBits_per_OFDM=simulator.payloadBits_per_OFDM
-        )
-        histories[model_name] = models[model_name].train(
-            x_train,
-            y_train,
-            epochs=10,
-            batch_size=32,
-            validation_data=(x_test, y_test),
-            dataset_type=channel
-        )
-
-    MultiModelBCP.plot_all_learning_curves(
-        save_path="multi_channel_comparison.png",
-        plot_batch=True,
-        plot_epoch=True,
-        plot_train_bit_err=False  # 默认不绘制训练误比特率
+    meta_tasks = []
+    for channel in meta_channel_types:
+        x_task, y_task = simulator.generate_training_dataset(channel, bits[:1000], mode=channel)
+        meta_tasks.append((x_task, y_task))
+    
+    meta_model = MetaDNN(
+        input_dim=x_task.shape[1],
+        payloadBits_per_OFDM=simulator.payloadBits_per_OFDM,
+        inner_lr=0.003,
+        meta_lr=0.25
     )
+    meta_x_test, meta_y_test = simulator.generate_testing_dataset("random_mixed", 100000)
+    meta_model.train_reptile(meta_tasks, meta_epochs=200, inner_steps=3,meta_validation_data=(meta_x_test, meta_y_test))
+    MultiModelBCP.log_manual_data("Meta_DNN_train",meta_model.all_epoch_losses,meta_model.all_val_bit_errs,dataset_type="meta")
+
+    # 保存 Train 阶段的图表
+    MultiModelBCP.plot_all_learning_curves(
+        save_path="train_phase_comparison.png",
+        plot_batch=False,
+        plot_epoch=True,
+        plot_train_bit_err=False
+    )
+
+    # # Generalization Testing 阶段
+    # print("=== 3GPP Generalization Testing Phase ===")
+    # MultiModelBCP.clear_data()
+    # sample_sizes = [100, 500, 1000]
+    # x_3gpp_val, y_3gpp_val = simulator.generate_testing_dataset("3gpp", 10000)
+
+    # for size in sample_sizes:
+    #     bits_array = simulator.generate_bits(size)
+    #     x_3gpp_train, y_3gpp_train = simulator.generate_training_dataset("3gpp", bits_array)
+
+    #     # 传统 DNN 微调
+    #     for channel in channel_types:
+            
+    #         model_name = f"DNN_{channel}_3GPP_{size}"
+    #         dnn_model = models[f"DNN_{channel}"]
+    #         print(f"\nValidating on {channel} channel...")
+    #         dnn_model.train(
+    #             x_3gpp_train, y_3gpp_train,
+    #             epochs=1, batch_size=32,
+    #             validation_data=(x_3gpp_val, y_3gpp_val),
+    #             dataset_type=f"3gpp_{size}"
+    #         )
+
+    #     # Reptile DNN 微调
+    #     meta_model_name = f"MetaDNN_3GPP_{size}"
+    #     meta_model.fine_tune(x_3gpp_train, y_3gpp_train, steps=3)
+    #     val_bit_err = meta_model.evaluate(x_3gpp_val, y_3gpp_val)
+    #     MultiModelBCP.log_manual_data(meta_model_name, val_bit_err, dataset_type=f"3gpp_{size}")
+
+    # # 绘制 Generalization Testing 阶段的图表
+    # MultiModelBCP.plot_all_learning_curves(
+    #     save_path="3gpp_generalization_comparison.png",
+    #     plot_batch=False,
+    #     plot_epoch=True,
+    #     plot_train_bit_err=False
+    # )

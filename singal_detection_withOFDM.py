@@ -20,17 +20,35 @@ class MultiModelBCP(Callback):
         self.dataset_type = dataset_type
         if not hasattr(MultiModelBCP, "all_models_data"):
             MultiModelBCP.all_models_data = {}
+        
+        # Traditional metrics lists
         self.batch_loss = []
         self.batch_bit_err = []
         self.epoch_loss = []
         self.epoch_bit_err = []
         self.val_epoch_loss = []
         self.val_epoch_bit_err = []
+        
+        # Update-based tracking
+        self.update_counts = []  # Stores the update count at each recording point
+        self.metrics_by_updates = {
+            "loss": [],
+            "bit_err": [],
+            "val_loss": [],
+            "val_bit_err": []
+        }
+        self.current_update_count = 0
 
     def on_train_batch_end(self, batch, logs=None):
         logs = logs or {}
+        self.current_update_count += 1  # Increment update counter
         self.batch_loss.append(logs.get('loss', 0))
         self.batch_bit_err.append(logs.get('bit_err', 0))
+        
+        
+        self.update_counts.append(self.current_update_count)
+        self.metrics_by_updates["loss"].append(logs.get('loss', 0))
+        self.metrics_by_updates["bit_err"].append(logs.get('bit_err', 0))
 
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
@@ -38,21 +56,30 @@ class MultiModelBCP(Callback):
         self.epoch_bit_err.append(logs.get('bit_err', 0))
         self.val_epoch_loss.append(logs.get('val_loss', 0))
         self.val_epoch_bit_err.append(logs.get('val_bit_err', 0))
+        
+        # Record validation metrics with current update count
+        self.metrics_by_updates["val_loss"].append(logs.get('val_loss', 0))
+        self.metrics_by_updates["val_bit_err"].append(logs.get('val_bit_err', 0))
 
     def on_train_end(self, logs=None):
         MultiModelBCP.all_models_data[self.model_name] = {
+            # Traditional data
             "batch_loss": self.batch_loss,
             "batch_bit_err": self.batch_bit_err,
             "epoch_loss": self.epoch_loss,
             "epoch_bit_err": self.epoch_bit_err,
             "val_epoch_loss": self.val_epoch_loss,
             "val_epoch_bit_err": self.val_epoch_bit_err,
+            # Update-based tracking
+            "update_counts": self.update_counts,
+            "metrics_by_updates": self.metrics_by_updates,
+            "final_update_count": self.current_update_count,
             "dataset_type": self.dataset_type
         }
 
     @staticmethod
-    def log_manual_data(model_name, epoch_loss, val_bit_err, dataset_type="meta"):
-        """Record MetaDNN metrics - handles both single values and lists"""
+    def log_manual_data(model_name, epoch_loss, val_bit_err, update_counts=None, dataset_type="meta"):
+        """Record MetaDNN metrics with update counts"""
         # Convert inputs to lists if they're not already
         if isinstance(epoch_loss, (tf.Tensor, np.ndarray)):
             epoch_loss = epoch_loss.numpy() if hasattr(epoch_loss, 'numpy') else epoch_loss
@@ -62,6 +89,27 @@ class MultiModelBCP(Callback):
             val_bit_err = val_bit_err.numpy() if hasattr(val_bit_err, 'numpy') else val_bit_err
         val_bit_err_list = val_bit_err if isinstance(val_bit_err, list) else [val_bit_err]
         
+        # If update_counts not provided, create a list from 1 to len(metrics)
+        if update_counts is None:
+            update_counts = list(range(1, len(epoch_loss_list) + 1))
+        
+        # Ensure update_counts is a list matching the metrics length
+        if not isinstance(update_counts, list):
+            update_counts = [update_counts]
+        
+        # Use the longer of the two for length matching
+        max_len = max(len(epoch_loss_list), len(val_bit_err_list))
+        if len(update_counts) < max_len:
+            update_counts = list(range(1, max_len + 1))
+        
+        # Create metrics by updates structure
+        metrics_by_updates = {
+            "loss": epoch_loss_list,
+            "bit_err": val_bit_err_list,
+            "val_loss": [],
+            "val_bit_err": []
+        }
+        
         MultiModelBCP.all_models_data[model_name] = {
             "batch_loss": [],
             "batch_bit_err": [],
@@ -69,9 +117,14 @@ class MultiModelBCP(Callback):
             "epoch_bit_err": [],
             "val_epoch_loss": [],
             "val_epoch_bit_err": val_bit_err_list,
+            # Update-based tracking
+            "update_counts": update_counts[:max_len],
+            "metrics_by_updates": metrics_by_updates,
+            "final_update_count": update_counts[-1] if update_counts else 0,
             "dataset_type": dataset_type
         }
         print(f"Logged {len(epoch_loss_list)} loss values and {len(val_bit_err_list)} validation error values for {model_name}")
+        print(f"Final update count: {update_counts[-1] if update_counts else 0}")
 
     @staticmethod
     def plot_all_learning_curves(save_path="multi_model_learning_curve.png", 
@@ -112,10 +165,66 @@ class MultiModelBCP(Callback):
             plt.ylabel("Bit Error Rate")
             plt.legend()
 
-        plt.tight_layout()
+        plt.tight_layout(pad=3.0)
         plt.savefig(save_path)
         plt.close()
         print(f"Multi-model learning curves saved to {save_path}")
+
+    @staticmethod
+    def plot_by_updates(save_path="update_comparison.png", count_method="algorithmic"):
+        """
+        Plot learning curves using parameter updates as x-axis
+        
+        Args:
+            save_path: Path to save the plot
+            count_method: How to count updates - 'algorithmic' (default) or 'computational'
+        """
+        if not MultiModelBCP.all_models_data:
+            print("No data to plot.")
+            return
+        
+        plt.figure(figsize=(12, 10))
+        
+        # Create two plot versions
+        plt.subplot(2, 1, 1)
+        for model_name, data in MultiModelBCP.all_models_data.items():
+            if "update_counts" in data and "metrics_by_updates" in data:
+                update_counts = data["update_counts"]
+                loss_values = data["metrics_by_updates"]["loss"]
+                
+                # Only plot if we have data points
+                if update_counts and loss_values:
+                    plt.plot(update_counts[:len(loss_values)], loss_values, 
+                            label=f"{model_name} Loss", marker='o', markersize=3)
+        
+        plt.xlabel("Number of Parameter Updates")
+        plt.ylabel("Loss")
+        plt.title("Training Loss vs Parameter Updates")
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.legend()
+        
+        # Similar for validation metrics plot
+        plt.subplot(2, 1, 2)
+        for model_name, data in MultiModelBCP.all_models_data.items():
+            if "update_counts" in data and "metrics_by_updates" in data:
+                update_counts = data["update_counts"]
+                bit_errs = data["metrics_by_updates"]["bit_err"]
+                
+                # Only plot if we have data points
+                if update_counts and bit_errs:
+                    plt.plot(update_counts[:len(bit_errs)], bit_errs, 
+                            label=f"{model_name} Val Bit Err", marker='s', markersize=3)
+        
+        plt.xlabel("Number of Parameter Updates")
+        plt.ylabel("Bit Error Rate")
+        plt.title("Bit Error Rate vs Parameter Updates")
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.legend()
+        
+        plt.tight_layout(pad=3.0)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Update-based comparison saved to {save_path}")
 
     @staticmethod
     def clear_data():
@@ -327,6 +436,9 @@ class MetaDNN(base_models):
         self.optimizer = tf.keras.optimizers.SGD(inner_lr)
         self.all_epoch_losses = []
         self.all_val_bit_errs = []
+        self.update_counts = []  # Track update counts
+        self.total_updates = 0   # Counter for total meta-updates
+        self.inner_updates = 0   # Counter for inner loop updates (informational only)
     
     def get_params(self):
         return self.get_weights()
@@ -341,7 +453,7 @@ class MetaDNN(base_models):
     
     def inner_update(self, x_task, y_task, steps=3):
         model_copy = self.clone()
-        losses=[]
+        losses = []
 
         for _ in range(steps):
             with tf.GradientTape() as tape:
@@ -364,25 +476,46 @@ class MetaDNN(base_models):
 
             initial_params = self.get_params()
             meta_grads = [tf.zeros_like(p) for p in initial_params]
+            
+            # Inner loop updates tracking (for information)
+            epoch_inner_updates = 0
+            
             for x_task, y_task in tasks:
                 updated_model, task_loss = self.inner_update(x_task, y_task, inner_steps)
+                epoch_inner_updates += inner_steps  # Count inner updates
                 task_losses.append(task_loss)
                 updated_params = updated_model.get_params()
                 for i, (init_p, upd_p) in enumerate(zip(initial_params, updated_params)):
                     meta_grads[i] += (upd_p - init_p)
+            
+            # Apply meta-update
             new_params = []
             for init_p, grad in zip(initial_params, meta_grads):
                 new_params.append(init_p + current_meta_lr * grad / len(tasks))
             self.set_params(new_params)
-
+            
+            # Count this as one meta-update (the real parameter update)
+            self.total_updates += 1
+            self.inner_updates += epoch_inner_updates
+            
+            # Track metrics with update count
             epoch_loss = tf.reduce_mean(task_losses)
             self.all_epoch_losses.append(epoch_loss)
-            val_bit_err = self.evaluate(*meta_validation_data)
-            self.all_val_bit_errs.append(val_bit_err)
-            if meta_validation_data is not None and ((epoch + 1) % 50 == 0) :
-                print(f"Meta Epoch {epoch + 1}/{meta_epochs} completed, epoch_loss : {epoch_loss.numpy()}, val_bit_err : {val_bit_err}")
-            else:
-                print(f"Meta Epoch {epoch + 1}/{meta_epochs} completed")
+            self.update_counts.append(self.total_updates)
+            
+            # Evaluate on validation data
+            val_bit_err = None
+            if meta_validation_data is not None:
+                val_bit_err = self.evaluate(*meta_validation_data)
+                self.all_val_bit_errs.append(val_bit_err)
+                
+            # Print progress
+            if meta_validation_data is not None and (epoch + 1) % 50 == 0:
+                print(f"Meta Epoch {epoch + 1}/{meta_epochs}, "
+                    f"epoch_loss: {epoch_loss.numpy()}, val_bit_err: {val_bit_err}")
+        
+        print(f"Training completed with {self.total_updates} meta-updates and {self.inner_updates} inner-loop updates")
+        return self.all_epoch_losses, self.all_val_bit_errs, self.update_counts
     
     def fine_tune(self, x_train, y_train, steps=1):
         """在 3GPP 数据上微调"""
@@ -401,29 +534,30 @@ if __name__ == "__main__":
     models = {}
     histories = {}
 
-    # 生成训练数据
-    bits = simulator.generate_bits(10000)
+    # Generate training data 
+    bits = simulator.generate_bits(320)
     MultiModelBCP.clear_data()
 
-    # Train 阶段
-    # print("=== Train Phase ===")
-    # for channel in channel_types:
-        
-    #     x_train, y_train = simulator.generate_training_dataset(channel, bits)
-    #     x_test, y_test = simulator.generate_testing_dataset(channel, 2500)
-    #     model_name = f"DNN_{channel}"
-    #     models[model_name] = DNN(
-    #         input_dim=x_train.shape[1],
-    #         payloadBits_per_OFDM=simulator.payloadBits_per_OFDM
-    #     )
-    #     print(f"\nTraining on {channel} channel...")
-    #     histories[model_name] = models[model_name].train(
-    #         x_train, y_train,
-    #         epochs=10, batch_size=32,
-    #         validation_data=(x_test, y_test),
-    #         dataset_type=channel
-    #     )
+    # Train phase for standard DNN
+    print("=== Train Phase ===")
+    for channel in channel_types:
+        x_train, y_train = simulator.generate_training_dataset(channel, bits)
+        x_test, y_test = simulator.generate_testing_dataset(channel, 2500)
+        model_name = f"DNN_{channel}"
+        models[model_name] = DNN(
+            input_dim=x_train.shape[1],
+            payloadBits_per_OFDM=simulator.payloadBits_per_OFDM
+        )
+        print(f"\nTraining on {channel} channel...")
+        histories[model_name] = models[model_name].train(
+            x_train, y_train,
+            epochs=10, batch_size=16,
+            validation_data=(x_test, y_test),
+            dataset_type=channel
+        )
 
+    # Meta-learning phase
+    print("\n=== Meta-Learning Phase ===")
     meta_tasks = []
     for channel in meta_channel_types:
         x_task, y_task = simulator.generate_training_dataset(channel, bits[:1000], mode=channel)
@@ -435,20 +569,38 @@ if __name__ == "__main__":
         inner_lr=0.003,
         meta_lr=0.25
     )
-    meta_x_test, meta_y_test = simulator.generate_testing_dataset("random_mixed", 100000)
-    meta_model.train_reptile(meta_tasks, meta_epochs=200, inner_steps=3,meta_validation_data=(meta_x_test, meta_y_test))
-    MultiModelBCP.log_manual_data("Meta_DNN_train",meta_model.all_epoch_losses,meta_model.all_val_bit_errs,dataset_type="meta")
+    meta_x_test, meta_y_test = simulator.generate_testing_dataset("random_mixed", 10000)
+    
+    # Train meta-model and get update counts
+    losses, val_errs, update_counts = meta_model.train_reptile(
+        meta_tasks, 
+        meta_epochs=200, 
+        inner_steps=3,
+        meta_validation_data=(meta_x_test, meta_y_test)
+    )
+    
+    # Log meta-model data with update counts
+    MultiModelBCP.log_manual_data(
+        "Meta_DNN_train",
+        losses,
+        val_errs,
+        update_counts=update_counts,
+        dataset_type="meta"
+    )
 
-    # 保存 Train 阶段的图表
+    # Plot traditional learning curves
     MultiModelBCP.plot_all_learning_curves(
-        save_path="train_phase_comparison.png",
-        plot_batch=False,
+        save_path="train_phase_traditional.png",
+        plot_batch=True,
         plot_epoch=True,
         plot_train_bit_err=False
     )
-
-    # # Generalization Testing 阶段
-    # print("=== 3GPP Generalization Testing Phase ===")
+    
+    # Plot update-based comparison
+    MultiModelBCP.plot_by_updates(save_path="update_based_comparison.png")
+    
+    # # Generalization Testing phase
+    # print("\n=== 3GPP Generalization Testing Phase ===")
     # MultiModelBCP.clear_data()
     # sample_sizes = [100, 500, 1000]
     # x_3gpp_val, y_3gpp_val = simulator.generate_testing_dataset("3gpp", 10000)
@@ -457,12 +609,11 @@ if __name__ == "__main__":
     #     bits_array = simulator.generate_bits(size)
     #     x_3gpp_train, y_3gpp_train = simulator.generate_training_dataset("3gpp", bits_array)
 
-    #     # 传统 DNN 微调
+    #     # Traditional DNN fine-tuning
     #     for channel in channel_types:
-            
     #         model_name = f"DNN_{channel}_3GPP_{size}"
     #         dnn_model = models[f"DNN_{channel}"]
-    #         print(f"\nValidating on {channel} channel...")
+    #         print(f"\nValidating on {channel} channel with {size} samples...")
     #         dnn_model.train(
     #             x_3gpp_train, y_3gpp_train,
     #             epochs=1, batch_size=32,
@@ -470,13 +621,20 @@ if __name__ == "__main__":
     #             dataset_type=f"3gpp_{size}"
     #         )
 
-    #     # Reptile DNN 微调
+    #     # Meta DNN fine-tuning
     #     meta_model_name = f"MetaDNN_3GPP_{size}"
-    #     meta_model.fine_tune(x_3gpp_train, y_3gpp_train, steps=3)
+    #     train_err = meta_model.fine_tune(x_3gpp_train, y_3gpp_train, steps=3)
     #     val_bit_err = meta_model.evaluate(x_3gpp_val, y_3gpp_val)
-    #     MultiModelBCP.log_manual_data(meta_model_name, val_bit_err, dataset_type=f"3gpp_{size}")
+    #     print(f"Meta-model fine-tuned with {size} samples: train_err={train_err}, val_err={val_bit_err}")
+    #     MultiModelBCP.log_manual_data(
+    #         meta_model_name, 
+    #         train_err, 
+    #         val_bit_err, 
+    #         update_counts=3,  # 3 fine-tuning steps
+    #         dataset_type=f"3gpp_{size}"
+    #     )
 
-    # # 绘制 Generalization Testing 阶段的图表
+    # # Plot generalization comparison
     # MultiModelBCP.plot_all_learning_curves(
     #     save_path="3gpp_generalization_comparison.png",
     #     plot_batch=False,

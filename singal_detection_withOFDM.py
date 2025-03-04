@@ -429,10 +429,11 @@ class DNN(base_models):
         )
 
 class MetaDNN(base_models):
-    def __init__(self, input_dim, payloadBits_per_OFDM, inner_lr=0.01, meta_lr=0.001):
+    def __init__(self, input_dim, payloadBits_per_OFDM, inner_lr=0.01, meta_lr=0.001, mini_size=32):
         super(MetaDNN, self).__init__(input_dim, payloadBits_per_OFDM)
         self.inner_lr = inner_lr
         self.meta_lr = meta_lr
+        self.mini_batch_size = mini_size
         self.optimizer = tf.keras.optimizers.SGD(inner_lr)
         self.all_epoch_losses = []
         self.all_val_bit_errs = []
@@ -451,24 +452,33 @@ class MetaDNN(base_models):
         model_copy.set_params(self.get_params())
         return model_copy
     
-    def inner_update(self, x_task, y_task, steps=3):
+    def inner_update(self, x_task, y_task, steps=None):
         model_copy = self.clone()
         losses = []
 
+        num_samples = x_task.shape[0]
+        if steps is None:
+            steps = int(np.ceil(num_samples / self.mini_batch_size))
+
         for _ in range(steps):
+
+            batch_indices = np.random.choice(num_samples, size=min(self.mini_batch_size, num_samples), replace=False)
+            x_batch = tf.gather(x_task, batch_indices)
+            y_batch = tf.gather(y_task, batch_indices)
+
             with tf.GradientTape() as tape:
-                preds = model_copy(x_task, training=True)
-                loss = tf.keras.losses.mean_squared_error(y_task, preds)
+                preds = model_copy(x_batch, training=True)
+                loss = tf.keras.losses.mean_squared_error(y_batch, preds)
                 losses.append(tf.reduce_mean(loss))
             grads = tape.gradient(loss, model_copy.trainable_variables)
             self.optimizer.apply_gradients(zip(grads, model_copy.trainable_variables))
-        return model_copy, tf.reduce_mean(losses)
+        return model_copy, tf.reduce_mean(losses), steps
     
     def evaluate(self, x_val, y_val):
         preds = self(x_val, training=False)
         return bit_err(y_val, preds).numpy()
     
-    def train_reptile(self, tasks, meta_epochs=10, inner_steps=3, meta_validation_data=None):
+    def train_reptile(self, tasks, meta_epochs=10, inner_steps=None, meta_validation_data=None):
         for epoch in range(meta_epochs):
             frac_done = epoch/meta_epochs
             current_meta_lr = (1-frac_done) * self.meta_lr 
@@ -481,7 +491,7 @@ class MetaDNN(base_models):
             epoch_inner_updates = 0
             
             for x_task, y_task in tasks:
-                updated_model, task_loss = self.inner_update(x_task, y_task, inner_steps)
+                updated_model, task_loss, inner_steps = self.inner_update(x_task, y_task, inner_steps)
                 epoch_inner_updates += inner_steps  # Count inner updates
                 task_losses.append(task_loss)
                 updated_params = updated_model.get_params()
@@ -534,8 +544,11 @@ if __name__ == "__main__":
     models = {}
     histories = {}
 
+    DNN_samples = 2000
+    DNN_epoch = 10
+    DNN_batch_size = 16
     # Generate training data 
-    bits = simulator.generate_bits(320)
+    bits = simulator.generate_bits(DNN_samples)
     MultiModelBCP.clear_data()
 
     # Train phase for standard DNN
@@ -551,7 +564,7 @@ if __name__ == "__main__":
         print(f"\nTraining on {channel} channel...")
         histories[model_name] = models[model_name].train(
             x_train, y_train,
-            epochs=10, batch_size=16,
+            epochs=DNN_epoch, batch_size=DNN_batch_size,
             validation_data=(x_test, y_test),
             dataset_type=channel
         )
@@ -559,23 +572,31 @@ if __name__ == "__main__":
     # Meta-learning phase
     print("\n=== Meta-Learning Phase ===")
     meta_tasks = []
+    total_meta_interation = int((DNN_samples/DNN_batch_size)*DNN_epoch)
+    print(f"Meta_update: {total_meta_interation}")
+
+    samples_per_channel = DNN_samples // len(meta_channel_types)
+    start_idx = 0
     for channel in meta_channel_types:
-        x_task, y_task = simulator.generate_training_dataset(channel, bits[:1000], mode=channel)
+        end_idx = start_idx + samples_per_channel
+        x_task, y_task = simulator.generate_training_dataset(channel, bits[start_idx:end_idx], mode=channel)
         meta_tasks.append((x_task, y_task))
+        start_idx = end_idx
+
     
     meta_model = MetaDNN(
         input_dim=x_task.shape[1],
         payloadBits_per_OFDM=simulator.payloadBits_per_OFDM,
         inner_lr=0.003,
-        meta_lr=0.25
+        meta_lr=0.25,
+        mini_size = 32
     )
     meta_x_test, meta_y_test = simulator.generate_testing_dataset("random_mixed", 10000)
     
     # Train meta-model and get update counts
     losses, val_errs, update_counts = meta_model.train_reptile(
         meta_tasks, 
-        meta_epochs=200, 
-        inner_steps=3,
+        meta_epochs=total_meta_interation, 
         meta_validation_data=(meta_x_test, meta_y_test)
     )
     

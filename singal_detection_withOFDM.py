@@ -35,9 +35,13 @@ class MultiModelBCP(Callback):
             "loss": [],
             "bit_err": [],
             "val_loss": [],
-            "val_bit_err": []
+            "val_bit_err": [],
+            "val_update_counts":[]
         }
         self.current_update_count = 0
+        # self.val_update_counts = []
+        # self.val_bit_err_by_updates = []
+        # self.val_loss_by_updates = []
 
     def on_train_batch_end(self, batch, logs=None):
         logs = logs or {}
@@ -58,8 +62,16 @@ class MultiModelBCP(Callback):
         self.val_epoch_bit_err.append(logs.get('val_bit_err', 0))
         
         # Record validation metrics with current update count
+        last_update_count = self.current_update_count
         self.metrics_by_updates["val_loss"].append(logs.get('val_loss', 0))
         self.metrics_by_updates["val_bit_err"].append(logs.get('val_bit_err', 0))
+        self.metrics_by_updates["val_update_counts"].append(last_update_count)
+
+    def on_train_begin(self, logs=None):
+        self.metrics_by_updates["val_loss"].append(0.5)
+        self.metrics_by_updates["val_bit_err"].append(0.5)
+        self.metrics_by_updates["val_update_counts"].append(0)
+
 
     def on_train_end(self, logs=None):
         MultiModelBCP.all_models_data[self.model_name] = {
@@ -105,9 +117,10 @@ class MultiModelBCP(Callback):
         # Create metrics by updates structure
         metrics_by_updates = {
             "loss": epoch_loss_list,
-            "bit_err": val_bit_err_list,
+            "bit_err": [],
             "val_loss": [],
-            "val_bit_err": []
+            "val_bit_err": val_bit_err_list,
+            "val_update_counts": update_counts[:max_len]
         }
         
         MultiModelBCP.all_models_data[model_name] = {
@@ -207,12 +220,12 @@ class MultiModelBCP(Callback):
         plt.subplot(2, 1, 2)
         for model_name, data in MultiModelBCP.all_models_data.items():
             if "update_counts" in data and "metrics_by_updates" in data:
-                update_counts = data["update_counts"]
-                bit_errs = data["metrics_by_updates"]["bit_err"]
+                update_counts = data["metrics_by_updates"]["val_update_counts"]
+                bit_errs = data["metrics_by_updates"]["val_bit_err"]
                 
                 # Only plot if we have data points
                 if update_counts and bit_errs:
-                    plt.plot(update_counts[:len(bit_errs)], bit_errs, 
+                    plt.plot(update_counts, bit_errs, 
                             label=f"{model_name} Val Bit Err", marker='s', markersize=3)
         
         plt.xlabel("Number of Parameter Updates")
@@ -544,8 +557,8 @@ if __name__ == "__main__":
     models = {}
     histories = {}
 
-    DNN_samples = 2000
-    DNN_epoch = 10
+    DNN_samples = 500
+    DNN_epoch = 5
     DNN_batch_size = 16
     # Generate training data 
     bits = simulator.generate_bits(DNN_samples)
@@ -587,8 +600,8 @@ if __name__ == "__main__":
     meta_model = MetaDNN(
         input_dim=x_task.shape[1],
         payloadBits_per_OFDM=simulator.payloadBits_per_OFDM,
-        inner_lr=0.003,
-        meta_lr=0.25,
+        inner_lr=0.02,
+        meta_lr=0.3,
         mini_size = 32
     )
     meta_x_test, meta_y_test = simulator.generate_testing_dataset("random_mixed", 10000)

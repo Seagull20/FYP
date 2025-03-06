@@ -458,7 +458,7 @@ class MetaDNN(base_models):
         self.inner_lr = inner_lr
         self.meta_lr = meta_lr
         self.mini_batch_size = mini_size
-        self.optimizer = tf.keras.optimizers.SGD(inner_lr)
+        self.optimizer = tf.keras.optimizers.legacy.SGD(inner_lr)
         self.all_epoch_losses = []
         self.all_val_bit_errs = []
         self.update_counts = []  # Track update counts
@@ -490,8 +490,11 @@ class MetaDNN(base_models):
         losses = []
 
         num_samples = x_task.shape[0]
+        #inner_step selection
         if steps is None:
-            steps = int(np.ceil(num_samples / self.mini_batch_size))
+            steps = max(1, int(np.ceil(num_samples / self.mini_batch_size)))
+        else:
+            steps = min(steps, int(np.ceil(num_samples / self.mini_batch_size)))
 
         for _ in range(steps):
 
@@ -633,7 +636,8 @@ if __name__ == "__main__":
     losses, val_errs, update_counts = models["Meta_DNN"].train_reptile(
         meta_tasks, 
         meta_epochs=total_meta_interation, 
-        meta_validation_data=(meta_x_test, meta_y_test)
+        meta_validation_data=(meta_x_test, meta_y_test),
+        inner_steps= None
     )
     
     # Log meta-model data with update counts

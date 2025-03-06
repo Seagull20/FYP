@@ -11,6 +11,11 @@ Model = keras.Model
 layers = keras.layers
 Callback = keras.callbacks.Callback
 import matplotlib.pyplot as plt
+import math
+import time
+
+
+from playsound import playsound
 
 # 改进后的 MultiModelBCP 类
 class MultiModelBCP(Callback):
@@ -214,7 +219,7 @@ class MultiModelBCP(Callback):
         plt.ylabel("Loss")
         plt.title("Training Loss vs Parameter Updates")
         plt.grid(True, linestyle='--', alpha=0.7)
-        plt.legend()
+        plt.legend(loc="best")
         
         # Similar for validation metrics plot
         plt.subplot(2, 1, 2)
@@ -226,13 +231,13 @@ class MultiModelBCP(Callback):
                 # Only plot if we have data points
                 if update_counts and bit_errs:
                     plt.plot(update_counts, bit_errs, 
-                            label=f"{model_name} Val Bit Err", marker='s', markersize=3)
+                            label=f"{model_name}", marker='s', markersize=3)
         
         plt.xlabel("Number of Parameter Updates")
-        plt.ylabel("Bit Error Rate")
-        plt.title("Bit Error Rate vs Parameter Updates")
+        plt.ylabel("Val_Bit Error Rate")
+        plt.title("Val_Bit Error Rate vs Parameter Updates")
         plt.grid(True, linestyle='--', alpha=0.7)
-        plt.legend()
+        plt.legend(loc="best")
         
         plt.tight_layout(pad=3.0)
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -271,9 +276,9 @@ class signal_simulator():
             channel = channel[:, 0]
         elif self.channel_type == "rician":
             k = 10 ** (rician_factor / 10)
-            mu = np.sqrt(k / (k + 1))
+            rician_mu = np.sqrt(k / (k + 1))
             s = np.sqrt(1 / (2 * (k + 1)))
-            channel = mu + s * (np.random.randn(1, num_path) + 1j * np.random.randn(1, num_path))
+            channel = rician_mu + s * (np.random.randn(1, num_path) + 1j * np.random.randn(1, num_path))
             channel = channel[:, 0]
         elif self.channel_type == "awgn":
             return self.awgn(transmit_signals, self.SNRdB)
@@ -440,9 +445,15 @@ class DNN(base_models):
             callbacks=final_callbacks,
             verbose="auto"
         )
+    
+    def clone(self):
+        new_model = DNN(self.input_dim, self.output_dim)
+        new_model.model.set_weights(self.model.get_weights())
+        return new_model
 
 class MetaDNN(base_models):
-    def __init__(self, input_dim, payloadBits_per_OFDM, inner_lr=0.01, meta_lr=0.001, mini_size=32):
+    def __init__(self, input_dim, payloadBits_per_OFDM, inner_lr=0.01, meta_lr=0.3, mini_size=32,
+                 first_decay_steps=1000, t_mul=1.3, m_mul=0.9, alpha=0.001):
         super(MetaDNN, self).__init__(input_dim, payloadBits_per_OFDM)
         self.inner_lr = inner_lr
         self.meta_lr = meta_lr
@@ -453,6 +464,14 @@ class MetaDNN(base_models):
         self.update_counts = []  # Track update counts
         self.total_updates = 0   # Counter for total meta-updates
         self.inner_updates = 0   # Counter for inner loop updates (informational only)
+
+        self.meta_lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
+            initial_learning_rate=meta_lr,
+            first_decay_steps=first_decay_steps,
+            t_mul=t_mul,
+            m_mul=m_mul,
+            alpha=alpha
+        )
     
     def get_params(self):
         return self.get_weights()
@@ -461,10 +480,11 @@ class MetaDNN(base_models):
         self.set_weights(params)
     
     def clone(self):
-        model_copy = MetaDNN(self.input_dim, self.output_dim, self.inner_lr, self.meta_lr)
+        model_copy = MetaDNN(self.input_dim, self.output_dim, self.inner_lr, self.meta_lr, self.mini_batch_size)
         model_copy.set_params(self.get_params())
         return model_copy
     
+
     def inner_update(self, x_task, y_task, steps=None):
         model_copy = self.clone()
         losses = []
@@ -492,9 +512,10 @@ class MetaDNN(base_models):
         return bit_err(y_val, preds).numpy()
     
     def train_reptile(self, tasks, meta_epochs=10, inner_steps=None, meta_validation_data=None):
+        start_time = time.time()
         for epoch in range(meta_epochs):
-            frac_done = epoch/meta_epochs
-            current_meta_lr = (1-frac_done) * self.meta_lr 
+            epcoch_start_time = time.time()
+            current_meta_lr = self.meta_lr * (math.cos(math.pi * epoch / meta_epochs) + 1) / 2 
             task_losses = []
 
             initial_params = self.get_params()
@@ -535,9 +556,10 @@ class MetaDNN(base_models):
             # Print progress
             if meta_validation_data is not None and (epoch + 1) % 50 == 0:
                 print(f"Meta Epoch {epoch + 1}/{meta_epochs}, "
-                    f"epoch_loss: {epoch_loss.numpy()}, val_bit_err: {val_bit_err}")
+                    f"epoch_loss: {epoch_loss.numpy()}, val_bit_err: {val_bit_err}",
+                    f"Epoch Time: {time.time()-epcoch_start_time}s")
         
-        print(f"Training completed with {self.total_updates} meta-updates and {self.inner_updates} inner-loop updates")
+        print(f"Training completed with {self.total_updates} meta-updates and {self.inner_updates} inner-loop updates, Train Time:{time.time()-start_time:.2f}s")
         return self.all_epoch_losses, self.all_val_bit_errs, self.update_counts
     
     def fine_tune(self, x_train, y_train, steps=1):
@@ -552,12 +574,12 @@ class MetaDNN(base_models):
 
 if __name__ == "__main__":
     simulator = signal_simulator()
-    channel_types = ["awgn", "rician", "rayleigh", "sequential_mixed"]
+    channel_types = ["awgn", "rician", "rayleigh", "random_mixed"]
     meta_channel_types = ["awgn", "rician", "rayleigh"]
     models = {}
     histories = {}
 
-    DNN_samples = 500
+    DNN_samples = 960
     DNN_epoch = 5
     DNN_batch_size = 16
     # Generate training data 
@@ -585,10 +607,11 @@ if __name__ == "__main__":
     # Meta-learning phase
     print("\n=== Meta-Learning Phase ===")
     meta_tasks = []
+    meta_model_name = "Meta_DNN"
     total_meta_interation = int((DNN_samples/DNN_batch_size)*DNN_epoch)
     print(f"Meta_update: {total_meta_interation}")
 
-    samples_per_channel = DNN_samples // len(meta_channel_types)
+    samples_per_channel = int(np.ceil(DNN_samples/len(meta_channel_types)))
     start_idx = 0
     for channel in meta_channel_types:
         end_idx = start_idx + samples_per_channel
@@ -596,18 +619,18 @@ if __name__ == "__main__":
         meta_tasks.append((x_task, y_task))
         start_idx = end_idx
 
-    
-    meta_model = MetaDNN(
+    models[meta_model_name] = MetaDNN(
         input_dim=x_task.shape[1],
         payloadBits_per_OFDM=simulator.payloadBits_per_OFDM,
         inner_lr=0.02,
         meta_lr=0.3,
         mini_size = 32
     )
+    
     meta_x_test, meta_y_test = simulator.generate_testing_dataset("random_mixed", 10000)
     
     # Train meta-model and get update counts
-    losses, val_errs, update_counts = meta_model.train_reptile(
+    losses, val_errs, update_counts = models["Meta_DNN"].train_reptile(
         meta_tasks, 
         meta_epochs=total_meta_interation, 
         meta_validation_data=(meta_x_test, meta_y_test)
@@ -623,55 +646,57 @@ if __name__ == "__main__":
     )
 
     # Plot traditional learning curves
-    MultiModelBCP.plot_all_learning_curves(
-        save_path="train_phase_traditional.png",
-        plot_batch=True,
-        plot_epoch=True,
-        plot_train_bit_err=False
-    )
+    # MultiModelBCP.plot_all_learning_curves(
+    #     save_path="train_phase_traditional.png",
+    #     plot_batch=True,
+    #     plot_epoch=True,
+    #     plot_train_bit_err=False
+    # )
     
     # Plot update-based comparison
     MultiModelBCP.plot_by_updates(save_path="update_based_comparison.png")
     
-    # # Generalization Testing phase
-    # print("\n=== 3GPP Generalization Testing Phase ===")
-    # MultiModelBCP.clear_data()
-    # sample_sizes = [100, 500, 1000]
-    # x_3gpp_val, y_3gpp_val = simulator.generate_testing_dataset("3gpp", 10000)
+    # Generalization Testing phase
+    print("\n=== 3GPP Generalization Testing Phase ===")
+    MultiModelBCP.clear_data()
+    sample_sizes = [100,500] #[100,500,1000,100k]
+    x_3gpp_val, y_3gpp_val = simulator.generate_testing_dataset("3gpp", 10000)
+    val_epoch = 3
+    val_batch_size = 25
+    for size in sample_sizes:
 
-    # for size in sample_sizes:
-    #     bits_array = simulator.generate_bits(size)
-    #     x_3gpp_train, y_3gpp_train = simulator.generate_training_dataset("3gpp", bits_array)
+        DNN_num_update= int((size/val_batch_size)*val_epoch)
 
-    #     # Traditional DNN fine-tuning
-    #     for channel in channel_types:
-    #         model_name = f"DNN_{channel}_3GPP_{size}"
-    #         dnn_model = models[f"DNN_{channel}"]
-    #         print(f"\nValidating on {channel} channel with {size} samples...")
-    #         dnn_model.train(
-    #             x_3gpp_train, y_3gpp_train,
-    #             epochs=1, batch_size=32,
-    #             validation_data=(x_3gpp_val, y_3gpp_val),
-    #             dataset_type=f"3gpp_{size}"
-    #         )
+        bits_array = simulator.generate_bits(size)
+        x_3gpp_train, y_3gpp_train = simulator.generate_training_dataset("3gpp", bits_array)
 
-    #     # Meta DNN fine-tuning
-    #     meta_model_name = f"MetaDNN_3GPP_{size}"
-    #     train_err = meta_model.fine_tune(x_3gpp_train, y_3gpp_train, steps=3)
-    #     val_bit_err = meta_model.evaluate(x_3gpp_val, y_3gpp_val)
-    #     print(f"Meta-model fine-tuned with {size} samples: train_err={train_err}, val_err={val_bit_err}")
-    #     MultiModelBCP.log_manual_data(
-    #         meta_model_name, 
-    #         train_err, 
-    #         val_bit_err, 
-    #         update_counts=3,  # 3 fine-tuning steps
-    #         dataset_type=f"3gpp_{size}"
-    #     )
+        # Traditional DNN fine-tuning
+        for channel in channel_types:
+            model_name = f"DNN_{channel}_3GPP_{size}"
+            dnn_model = models[f"DNN_{channel}"].clone()
+            print(f"\nValidating on {channel} channel with {size} samples...")
+            dnn_model.train(
+                x_3gpp_train, y_3gpp_train,
+                epochs=val_epoch, batch_size=val_batch_size,
+                validation_data=(x_3gpp_val, y_3gpp_val),
+                dataset_type=f"{channel}_{size}"
+            )
 
-    # # Plot generalization comparison
-    # MultiModelBCP.plot_all_learning_curves(
-    #     save_path="3gpp_generalization_comparison.png",
-    #     plot_batch=False,
-    #     plot_epoch=True,
-    #     plot_train_bit_err=False
-    # )
+        # Meta DNN fine-tuning
+        meta_task_3gpp = [(x_3gpp_train, y_3gpp_train)]
+        meta_model = models["Meta_DNN"].clone()
+        meta_model_name = f"Meta_{size}"
+        losses, val_errs, update_counts = meta_model.train_reptile(
+        meta_task_3gpp, 
+        meta_epochs=DNN_num_update, 
+        meta_validation_data=(x_3gpp_val, y_3gpp_val)
+        )
+        MultiModelBCP.log_manual_data(
+            meta_model_name,
+            losses,
+            val_errs,
+            update_counts=update_counts,
+            dataset_type=f"3gpp_{size}"
+        )
+
+    MultiModelBCP.plot_by_updates(save_path="3gpp_gerneralization_test.png")

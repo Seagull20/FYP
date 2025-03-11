@@ -1,7 +1,7 @@
 from enum import auto
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-from global_parameters import *  # 假设包含 K, P, mu, CP, num_path, rician_factor, pilot_value, mapping_table 等
+from global_parameters import *  
 import numpy as np
 from numpy import sum, isrealobj, sqrt
 from numpy.random import standard_normal
@@ -11,13 +11,12 @@ Model = keras.Model
 layers = keras.layers
 Callback = keras.callbacks.Callback
 import matplotlib.pyplot as plt
-import math
+import gc
 import time
 
 
 from playsound import playsound
 
-# 改进后的 MultiModelBCP 类
 class MultiModelBCP(Callback):
     def __init__(self, model_name, dataset_type="default"):
         super(MultiModelBCP, self).__init__()
@@ -73,9 +72,10 @@ class MultiModelBCP(Callback):
         self.metrics_by_updates["val_update_counts"].append(last_update_count)
 
     def on_train_begin(self, logs=None):
-        self.metrics_by_updates["val_loss"].append(0.5)
-        self.metrics_by_updates["val_bit_err"].append(0.5)
-        self.metrics_by_updates["val_update_counts"].append(0)
+        pass
+        # self.metrics_by_updates["val_loss"].append(0.5)
+        # self.metrics_by_updates["val_bit_err"].append(0.5)
+        # self.metrics_by_updates["val_update_counts"].append(0)
 
 
     def on_train_end(self, logs=None):
@@ -248,7 +248,6 @@ class MultiModelBCP(Callback):
     def clear_data():
         MultiModelBCP.all_models_data = {}
 
-# signal_simulator 类
 class signal_simulator():
     def __init__(self, SNR=10):
         self.all_carriers = np.arange(K)
@@ -288,7 +287,7 @@ class signal_simulator():
             h = self.channel_3gpp[index]
             channel = h[:, 0]
         elif self.channel_type == "random_mixed" or self.channel_type == "sequential_mixed":
-            return transmit_signals  # 混合信道在 generate_mixed_dataset 中处理
+            return transmit_signals  
         else:
             raise ValueError("Invalid channel type")
         
@@ -329,7 +328,7 @@ class signal_simulator():
     def generate_training_dataset(self, channel_type, bits_array, mode="sequential_mixed"):
         if isinstance(channel_type, list) or channel_type in ["random_mixed", "sequential_mixed"]:
             if channel_type in ["random_mixed", "sequential_mixed"]:
-                channel_types = ["rician", "awgn", "rayleigh"]  # 默认混合信道类型
+                channel_types = ["rician", "awgn", "rayleigh"] 
                 return self.generate_mixed_dataset(channel_types, bits_array, mode=channel_type)
             return self.generate_mixed_dataset(channel_type, bits_array, mode=mode)
         
@@ -465,6 +464,9 @@ class MetaDNN(base_models):
         self.total_updates = 0   # Counter for total meta-updates
         self.inner_updates = 0   # Counter for inner loop updates (informational only)
 
+        self.best_weights = None
+        self.best_val_err = float('inf')
+
         self.meta_lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
             initial_learning_rate=meta_lr,
             first_decay_steps=first_decay_steps,
@@ -496,8 +498,7 @@ class MetaDNN(base_models):
         else:
             steps = min(steps, int(np.ceil(num_samples / self.mini_batch_size)))
 
-        for _ in range(steps):
-
+        for step in range(steps):
             batch_indices = np.random.choice(num_samples, size=min(self.mini_batch_size, num_samples), replace=False)
             x_batch = tf.gather(x_task, batch_indices)
             y_batch = tf.gather(y_task, batch_indices)
@@ -506,6 +507,7 @@ class MetaDNN(base_models):
                 preds = model_copy(x_batch, training=True)
                 loss = tf.keras.losses.mean_squared_error(y_batch, preds)
                 losses.append(tf.reduce_mean(loss))
+            
             grads = tape.gradient(loss, model_copy.trainable_variables)
             self.optimizer.apply_gradients(zip(grads, model_copy.trainable_variables))
         return model_copy, tf.reduce_mean(losses), steps
@@ -514,22 +516,44 @@ class MetaDNN(base_models):
         preds = self(x_val, training=False)
         return bit_err(y_val, preds).numpy()
     
-    def train_reptile(self, tasks, meta_epochs=10, inner_steps=None, meta_validation_data=None):
+    def train_reptile(self, tasks, meta_epochs=10, task_steps=None, meta_validation_data=None):
         start_time = time.time()
+        epoch_times = []
+        meta_grads = None
+        warmup_epochs = min(50, meta_epochs // 10)
+        
         for epoch in range(meta_epochs):
-            epcoch_start_time = time.time()
-            current_meta_lr = self.meta_lr * (math.cos(math.pi * epoch / meta_epochs) + 1) / 2 
+            epoch_start_time = time.time()
+            # Get current learning rate - add warmup phase
+            if epoch < warmup_epochs:
+                # Linear warmup
+                current_meta_lr = self.meta_lr * (epoch + 1) / warmup_epochs
+            else:
+                # Use learning rate schedule
+                current_meta_lr = self.meta_lr_schedule(epoch - warmup_epochs)
+
             task_losses = []
 
             initial_params = self.get_params()
-            meta_grads = [tf.zeros_like(p) for p in initial_params]
+            
+            # Create or reset weight accumulator
+            if meta_grads is None:
+                meta_grads = [tf.zeros_like(p) for p in initial_params]
+            else:
+                for i in range(len(meta_grads)):
+                    meta_grads[i] = tf.zeros_like(meta_grads[i])
             
             # Inner loop updates tracking (for information)
             epoch_inner_updates = 0
-            
+            current_inner_steps = task_steps
+            # if current_inner_steps is None:
+            #     # 根据训练进度动态调整内部步数
+            #     progress = min(1.0, epoch / (meta_epochs * 0.7))
+            #     current_inner_steps = max(5, int(3 + progress * 7))  # 范围从3到10步
+
             for x_task, y_task in tasks:
-                updated_model, task_loss, inner_steps = self.inner_update(x_task, y_task, inner_steps)
-                epoch_inner_updates += inner_steps  # Count inner updates
+                updated_model, task_loss, task_steps_used = self.inner_update(x_task, y_task, current_inner_steps)
+                epoch_inner_updates += task_steps_used  # Count inner updates
                 task_losses.append(task_loss)
                 updated_params = updated_model.get_params()
                 for i, (init_p, upd_p) in enumerate(zip(initial_params, updated_params)):
@@ -545,26 +569,43 @@ class MetaDNN(base_models):
             self.total_updates += 1
             self.inner_updates += epoch_inner_updates
             
-            # Track metrics with update count
+            # Track metrics with update count - but only store periodically to save memory
             epoch_loss = tf.reduce_mean(task_losses)
             self.all_epoch_losses.append(epoch_loss)
             self.update_counts.append(self.total_updates)
-            
-            # Evaluate on validation data
+                
+                # Evaluate on validation data
             val_bit_err = None
             if meta_validation_data is not None:
                 val_bit_err = self.evaluate(*meta_validation_data)
                 self.all_val_bit_errs.append(val_bit_err)
                 
-            # Print progress
-            if meta_validation_data is not None and (epoch + 1) % 50 == 0:
+                # trace the best model
+                if val_bit_err < self.best_val_err:
+                    self.best_val_err = val_bit_err
+                    self.best_weights = [tf.identity(w) for w in self.get_weights()]
+            
+            # epoch time
+            epoch_time = time.time() - epoch_start_time
+            epoch_times.append(epoch_time)
+            
+            # print progress
+            if (epoch + 1) % 50 == 0:
+                avg_time = np.mean(epoch_times[-50:])
                 print(f"Meta Epoch {epoch + 1}/{meta_epochs}, "
-                    f"epoch_loss: {epoch_loss.numpy()}, val_bit_err: {val_bit_err}",
-                    f"Epoch Time: {time.time()-epcoch_start_time}s")
-        
+                      f"loss: {epoch_loss.numpy():.6f}, "
+                      f"val_bit_err: {val_bit_err:.6f}, "
+                      f"LR: {current_meta_lr:.6f}, "
+                    #   f"Inner Steps: {current_inner_steps}, "
+                      f"Avg Time: {avg_time:.4f}s")
+                
+            if self.best_weights is not None:
+                # print(f"Restoring best model with val_bit_err: {self.best_val_err:.6f}")
+                self.set_weights(self.best_weights)
+            
         print(f"Training completed with {self.total_updates} meta-updates and {self.inner_updates} inner-loop updates, Train Time:{time.time()-start_time:.2f}s")
         return self.all_epoch_losses, self.all_val_bit_errs, self.update_counts
-    
+        
     def fine_tune(self, x_train, y_train, steps=1):
         """在 3GPP 数据上微调"""
         for _ in range(steps):
@@ -576,18 +617,27 @@ class MetaDNN(base_models):
         return self.evaluate(x_train, y_train)
 
 if __name__ == "__main__":
+    gc.collect()
     simulator = signal_simulator()
     channel_types = ["awgn", "rician", "rayleigh", "random_mixed"]
     meta_channel_types = ["awgn", "rician", "rayleigh"]
     models = {}
     histories = {}
 
-    DNN_samples = 960
-    DNN_epoch = 5
-    DNN_batch_size = 16
+    DNN_samples = 7680
+    DNN_epoch = 10
+    DNN_batch_size = 32
     # Generate training data 
     bits = simulator.generate_bits(DNN_samples)
     MultiModelBCP.clear_data()
+
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+        except RuntimeError as e:
+            print(e)
 
     # Train phase for standard DNN
     print("=== Train Phase ===")
@@ -614,6 +664,7 @@ if __name__ == "__main__":
     total_meta_interation = int((DNN_samples/DNN_batch_size)*DNN_epoch)
     print(f"Meta_update: {total_meta_interation}")
 
+    #generate tasks
     samples_per_channel = int(np.ceil(DNN_samples/len(meta_channel_types)))
     start_idx = 0
     for channel in meta_channel_types:
@@ -637,7 +688,7 @@ if __name__ == "__main__":
         meta_tasks, 
         meta_epochs=total_meta_interation, 
         meta_validation_data=(meta_x_test, meta_y_test),
-        inner_steps= None
+        task_steps= None
     )
     
     # Log meta-model data with update counts
@@ -663,14 +714,14 @@ if __name__ == "__main__":
     # Generalization Testing phase
     print("\n=== 3GPP Generalization Testing Phase ===")
     MultiModelBCP.clear_data()
-    sample_sizes = [100,500] #[100,500,1000,100k]
+    sample_sizes = [50,100,500,1000,100000] #[50,100,500,1000,100k]
     x_3gpp_val, y_3gpp_val = simulator.generate_testing_dataset("3gpp", 10000)
-    val_epoch = 3
+    val_epoch = 1
     val_batch_size = 25
     for size in sample_sizes:
 
         DNN_num_update= int((size/val_batch_size)*val_epoch)
-
+        print(f"{size} set with {DNN_num_update} times updates")
         bits_array = simulator.generate_bits(size)
         x_3gpp_train, y_3gpp_train = simulator.generate_training_dataset("3gpp", bits_array)
 

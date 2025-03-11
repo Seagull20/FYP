@@ -11,7 +11,6 @@ Model = keras.Model
 layers = keras.layers
 Callback = keras.callbacks.Callback
 import matplotlib.pyplot as plt
-import gc
 import time
 
 
@@ -617,7 +616,7 @@ class MetaDNN(base_models):
         return self.evaluate(x_train, y_train)
 
 if __name__ == "__main__":
-    gc.collect()
+
     simulator = signal_simulator()
     channel_types = ["awgn", "rician", "rayleigh", "random_mixed"]
     meta_channel_types = ["awgn", "rician", "rayleigh"]

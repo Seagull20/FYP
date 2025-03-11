@@ -624,9 +624,9 @@ if __name__ == "__main__":
     models = {}
     histories = {}
 
-    DNN_samples = 7680
-    DNN_epoch = 10
-    DNN_batch_size = 32
+    DNN_samples = 100000
+    DNN_epoch = 20
+    DNN_batch_size = 64
     # Generate training data 
     bits = simulator.generate_bits(DNN_samples)
     MultiModelBCP.clear_data()
@@ -665,20 +665,25 @@ if __name__ == "__main__":
     print(f"Meta_update: {total_meta_interation}")
 
     #generate tasks
-    samples_per_channel = int(np.ceil(DNN_samples/len(meta_channel_types)))
-    start_idx = 0
+    # samples_per_channel = int(np.ceil(DNN_samples/len(meta_channel_types)))
+    # start_idx = 0
+    # for channel in meta_channel_types:
+    #     end_idx = start_idx + samples_per_channel
+    #     x_task, y_task = simulator.generate_training_dataset(channel, bits[start_idx:end_idx], mode=channel)
+    #     meta_tasks.append((x_task, y_task))
+    #     start_idx = end_idx
+
+    #size of each task equall to DNN
     for channel in meta_channel_types:
-        end_idx = start_idx + samples_per_channel
-        x_task, y_task = simulator.generate_training_dataset(channel, bits[start_idx:end_idx], mode=channel)
+        x_task, y_task = simulator.generate_training_dataset(channel, bits, mode=channel)
         meta_tasks.append((x_task, y_task))
-        start_idx = end_idx
 
     models[meta_model_name] = MetaDNN(
         input_dim=x_task.shape[1],
         payloadBits_per_OFDM=simulator.payloadBits_per_OFDM,
         inner_lr=0.02,
         meta_lr=0.3,
-        mini_size = 32
+        mini_size = 64
     )
     
     meta_x_test, meta_y_test = simulator.generate_testing_dataset("random_mixed", 10000)

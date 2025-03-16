@@ -451,7 +451,8 @@ class DNN(base_models):
 
 class MetaDNN(base_models):
     def __init__(self, input_dim, payloadBits_per_OFDM, inner_lr=0.01, meta_lr=0.3, mini_size=32,
-                 first_decay_steps=1000, t_mul=1.3, m_mul=0.9, alpha=0.001):
+                 first_decay_steps=1000, t_mul=1.3, m_mul=0.9, alpha=0.001,
+                 early_stopping=True, patience=50, min_delta=0.0001, verbose=1):
         super(MetaDNN, self).__init__(input_dim, payloadBits_per_OFDM)
         self.inner_lr = inner_lr
         self.meta_lr = meta_lr
@@ -465,7 +466,15 @@ class MetaDNN(base_models):
 
         self.best_weights = None
         self.best_val_err = float('inf')
-
+        
+        # Early stopping parameters
+        self.early_stopping = early_stopping
+        self.patience = patience
+        self.min_delta = min_delta
+        self.verbose = verbose
+        self.wait = 0  # Counter for patience
+        self.stopped_epoch = 0  # The epoch at which training was stopped
+        
         self.meta_lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
             initial_learning_rate=meta_lr,
             first_decay_steps=first_decay_steps,
@@ -481,10 +490,34 @@ class MetaDNN(base_models):
         self.set_weights(params)
     
     def clone(self):
-        model_copy = MetaDNN(self.input_dim, self.output_dim, self.inner_lr, self.meta_lr, self.mini_batch_size)
+        model_copy = MetaDNN(
+            self.input_dim, self.output_dim, 
+            self.inner_lr, self.meta_lr, self.mini_batch_size,
+            early_stopping=self.early_stopping,
+            patience=self.patience,
+            min_delta=self.min_delta,
+            verbose=self.verbose
+        )
         model_copy.set_params(self.get_params())
         return model_copy
     
+    def _should_stop_early(self, val_err):
+        """Check if training should be stopped based on validation error."""
+        if not self.early_stopping:
+            return False
+            
+        if val_err < self.best_val_err - self.min_delta:
+            # Validation error improved
+            self.best_val_err = val_err
+            self.best_weights = [tf.identity(w) for w in self.get_weights()]
+            self.wait = 0
+        else:
+            # Validation error did not improve
+            self.wait += 1
+            if self.wait >= self.patience:
+                self.stopped_epoch = self.total_updates
+                return True
+        return False
 
     def inner_update(self, x_task, y_task, steps=None):
         model_copy = self.clone()
@@ -521,6 +554,12 @@ class MetaDNN(base_models):
         meta_grads = None
         warmup_epochs = min(50, meta_epochs // 10)
         
+        # Initialize early stopping variables
+        self.wait = 0
+        self.best_val_err = float('inf')
+        self.best_weights = None
+        self.stopped_epoch = 0
+        
         for epoch in range(meta_epochs):
             epoch_start_time = time.time()
             # Get current learning rate - add warmup phase
@@ -545,10 +584,6 @@ class MetaDNN(base_models):
             # Inner loop updates tracking (for information)
             epoch_inner_updates = 0
             current_inner_steps = task_steps
-            # if current_inner_steps is None:
-            #     # 根据训练进度动态调整内部步数
-            #     progress = min(1.0, epoch / (meta_epochs * 0.7))
-            #     current_inner_steps = max(5, int(3 + progress * 7))  # 范围从3到10步
 
             for x_task, y_task in tasks:
                 updated_model, task_loss, task_steps_used = self.inner_update(x_task, y_task, current_inner_steps)
@@ -573,16 +608,18 @@ class MetaDNN(base_models):
             self.all_epoch_losses.append(epoch_loss)
             self.update_counts.append(self.total_updates)
                 
-                # Evaluate on validation data
+            # Evaluate on validation data
             val_bit_err = None
             if meta_validation_data is not None:
                 val_bit_err = self.evaluate(*meta_validation_data)
                 self.all_val_bit_errs.append(val_bit_err)
                 
-                # trace the best model
-                if val_bit_err < self.best_val_err:
-                    self.best_val_err = val_bit_err
-                    self.best_weights = [tf.identity(w) for w in self.get_weights()]
+                # Check for early stopping
+                if self._should_stop_early(val_bit_err):
+                    if self.verbose > 0:
+                        print(f"\nEarly stopping triggered at update {self.total_updates}. "
+                              f"Best val_bit_err: {self.best_val_err:.6f}")
+                    break
             
             # epoch time
             epoch_time = time.time() - epoch_start_time
@@ -595,14 +632,19 @@ class MetaDNN(base_models):
                       f"loss: {epoch_loss.numpy():.6f}, "
                       f"val_bit_err: {val_bit_err:.6f}, "
                       f"LR: {current_meta_lr:.6f}, "
-                    #   f"Inner Steps: {current_inner_steps}, "
                       f"Avg Time: {avg_time:.4f}s")
-                
-            if self.best_weights is not None:
-                # print(f"Restoring best model with val_bit_err: {self.best_val_err:.6f}")
-                self.set_weights(self.best_weights)
+        
+        # Restore best model weights
+        if self.best_weights is not None:
+            if self.verbose > 0:
+                print(f"Restoring best model with val_bit_err: {self.best_val_err:.6f}")
+            self.set_weights(self.best_weights)
             
-        print(f"Training completed with {self.total_updates} meta-updates and {self.inner_updates} inner-loop updates, Train Time:{time.time()-start_time:.2f}s")
+        total_time = time.time() - start_time
+        print(f"Training completed with {self.total_updates} meta-updates and {self.inner_updates} inner-loop updates, Train Time:{total_time:.2f}s")
+        if self.stopped_epoch > 0 and self.verbose > 0:
+            print(f"Early stopping occurred at update {self.stopped_epoch}")
+            
         return self.all_epoch_losses, self.all_val_bit_errs, self.update_counts
         
     def fine_tune(self, x_train, y_train, steps=1):
@@ -623,9 +665,9 @@ if __name__ == "__main__":
     models = {}
     histories = {}
 
-    DNN_samples = 100000
-    DNN_epoch = 20
-    DNN_batch_size = 64
+    DNN_samples = 32000 # 5120 = 1600 updates
+    DNN_epoch = 10
+    DNN_batch_size = 32
     # Generate training data 
     bits = simulator.generate_bits(DNN_samples)
     MultiModelBCP.clear_data()
@@ -682,7 +724,7 @@ if __name__ == "__main__":
         payloadBits_per_OFDM=simulator.payloadBits_per_OFDM,
         inner_lr=0.02,
         meta_lr=0.3,
-        mini_size = 64
+        mini_size = 32
     )
     
     meta_x_test, meta_y_test = simulator.generate_testing_dataset("random_mixed", 10000)
@@ -692,7 +734,7 @@ if __name__ == "__main__":
         meta_tasks, 
         meta_epochs=total_meta_interation, 
         meta_validation_data=(meta_x_test, meta_y_test),
-        task_steps= None
+        task_steps= 50
     )
     
     # Log meta-model data with update counts
@@ -718,9 +760,9 @@ if __name__ == "__main__":
     # Generalization Testing phase
     print("\n=== 3GPP Generalization Testing Phase ===")
     MultiModelBCP.clear_data()
-    sample_sizes = [50,100,500,1000,100000] #[50,100,500,1000,100k]
+    sample_sizes = [50,100,500,1000] #[50,100,500,1000,100k]
     x_3gpp_val, y_3gpp_val = simulator.generate_testing_dataset("3gpp", 10000)
-    val_epoch = 1
+    val_epoch = 3
     val_batch_size = 25
     for size in sample_sizes:
 
@@ -748,7 +790,8 @@ if __name__ == "__main__":
         losses, val_errs, update_counts = meta_model.train_reptile(
         meta_task_3gpp, 
         meta_epochs=DNN_num_update, 
-        meta_validation_data=(x_3gpp_val, y_3gpp_val)
+        meta_validation_data=(x_3gpp_val, y_3gpp_val),
+        task_steps= 50
         )
         MultiModelBCP.log_manual_data(
             meta_model_name,

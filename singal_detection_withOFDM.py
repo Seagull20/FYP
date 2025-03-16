@@ -408,7 +408,7 @@ class base_models(Model):
         self.model = keras.Sequential([
             layers.Dense(256, activation='relu', input_shape=(input_dim,)),
             layers.Dense(512, activation='relu'),
-            layers.Dropout(0.2),
+            #layers.Dropout(0.2),
             layers.Dense(256, activation='relu'),
             layers.Dense(payloadBits_per_OFDM, activation='sigmoid')
         ])

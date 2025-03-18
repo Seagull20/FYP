@@ -13,9 +13,6 @@ Callback = keras.callbacks.Callback
 import matplotlib.pyplot as plt
 import time
 
-
-from playsound import playsound
-
 class MultiModelBCP(Callback):
     def __init__(self, model_name, dataset_type="default"):
         super(MultiModelBCP, self).__init__()
@@ -451,8 +448,8 @@ class DNN(base_models):
 
 class MetaDNN(base_models):
     def __init__(self, input_dim, payloadBits_per_OFDM, inner_lr=0.01, meta_lr=0.3, mini_size=32,
-                 first_decay_steps=1000, t_mul=1.3, m_mul=0.9, alpha=0.001,
-                 early_stopping=True, patience=50, min_delta=0.0001, verbose=1):
+                 first_decay_steps=500, t_mul=1.1, m_mul=1, alpha=0.001,
+                 early_stopping=True, patience=50, min_delta=0.00005, verbose=1):
         super(MetaDNN, self).__init__(input_dim, payloadBits_per_OFDM)
         self.inner_lr = inner_lr
         self.meta_lr = meta_lr
@@ -665,7 +662,7 @@ if __name__ == "__main__":
     models = {}
     histories = {}
 
-    DNN_samples = 32000 # 5120 = 1600 updates
+    DNN_samples = 100000 # 5120 = 1600 updates
     DNN_epoch = 10
     DNN_batch_size = 32
     # Generate training data 
@@ -724,7 +721,8 @@ if __name__ == "__main__":
         payloadBits_per_OFDM=simulator.payloadBits_per_OFDM,
         inner_lr=0.02,
         meta_lr=0.3,
-        mini_size = 32
+        mini_size = 32,
+        early_stopping=False
     )
     
     meta_x_test, meta_y_test = simulator.generate_testing_dataset("random_mixed", 10000)

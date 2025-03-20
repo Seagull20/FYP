@@ -662,7 +662,7 @@ if __name__ == "__main__":
     models = {}
     histories = {}
 
-    DNN_samples = 100000 # 5120 = 1600 updates
+    DNN_samples = 64000 # 5120 = 1600 updates
     DNN_epoch = 10
     DNN_batch_size = 32
     # Generate training data 
@@ -758,11 +758,17 @@ if __name__ == "__main__":
     # Generalization Testing phase
     print("\n=== 3GPP Generalization Testing Phase ===")
     MultiModelBCP.clear_data()
-    sample_sizes = [50,100,500,1000] #[50,100,500,1000,100k]
+    val_parameter_set = [
+        #(size,batch size)
+        (50,5),
+        (100,5),
+        (500,16),
+        (1000,32),
+        (64000,32)
+    ]
     x_3gpp_val, y_3gpp_val = simulator.generate_testing_dataset("3gpp", 10000)
     val_epoch = 3
-    val_batch_size = 25
-    for size in sample_sizes:
+    for size,val_batch_size in val_parameter_set:
 
         DNN_num_update= int((size/val_batch_size)*val_epoch)
         print(f"{size} set with {DNN_num_update} times updates")

@@ -699,8 +699,9 @@ if __name__ == "__main__":
     print("\n=== Meta-Learning Phase ===")
     meta_tasks = []
     meta_model_name = "Meta_DNN"
-    total_meta_interation = int((DNN_samples/DNN_batch_size)*DNN_epoch)
-    print(f"Meta_update: {total_meta_interation}")
+
+    total_meta_iteration = int((DNN_samples/DNN_batch_size)*DNN_epoch)
+    print(f"Meta updates: {total_meta_iteration}")
 
     #generate tasks
     # samples_per_channel = int(np.ceil(DNN_samples/len(meta_channel_types)))

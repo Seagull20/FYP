@@ -43,7 +43,7 @@ num_simulate_target = 5000
 num_test_target = 1000
 
 learning_rate = 0.001
-batch_size = 64
+batch_size = 32
 num_epochs = 20
 rician_factor = 1
 num_running = 1

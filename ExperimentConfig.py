@@ -3,191 +3,212 @@ import datetime
 import pprint
 import json
 import numpy as np
-import importlib.util
 import importlib
 from singal_detection_withOFDM import MetaDNN
 
 class ExperimentConfig:
-    """OFDM信号检测实验的配置管理类 - 完全集成版"""
+    """Configuration management class for OFDM signal detection experiments - Fully integrated version"""
     
-    all_models_data = {}  # 与MultiModelBCP兼容
+    all_models_data = {}  # Compatible with MultiModelBCP
     
-    def __init__(self, global_params_file="global_parameters.py"):
+    def __init__(self):
         """
-        初始化配置对象，将全局参数完全集成到配置中
-        
-        参数:
-            global_params_file: 全局参数文件路径
+        Initialize configuration object with hardcoded global parameters from global_parameters.py
         """
-        # 加载全局参数
-        self.global_params = self._load_global_params(global_params_file)
-        
-        # 初始化完全集成的配置
+        # Initialize fully integrated configuration with direct global parameter values
         self.config = {
-            # 全局参数设置
+            # Global parameter settings (directly from global_parameters.py)
             "global": {
-                "K": self.global_params.get("K", 64),                      # 子载波数量
-                "CP": self.global_params.get("CP", 16),                    # 循环前缀长度
-                "P": self.global_params.get("P", 8),                       # 导频载波数量
-                "pilot_value": self._complex_to_dict(self.global_params.get("pilot_value", 1+1j)),  # 导频值
-                "mu": self.global_params.get("mu", 2),                     # 每符号比特数
-                "mapping_table": self._convert_mapping_table(self.global_params.get("mapping_table", {})),  # 映射表
-                "demapping_table": None,                                   # 反映射表（自动计算）
-                "num_path": self.global_params.get("num_path", 16),        # 信道路径数
-                "rician_factor": self.global_params.get("rician_factor", 1),  # 莱斯因子
-                "num_simulate": self.global_params.get("num_simulate", 50000),  # 模拟数量
-                "num_simulate_target": self.global_params.get("num_simulate_target", 5000),  # 目标模拟数量
-                "num_test_target": self.global_params.get("num_test_target", 1000),  # 目标测试数量
-                "num_running": self.global_params.get("num_running", 1)    # 运行次数
+                "K": 64,                      # Number of subcarriers
+                "CP": 16,                     # Cyclic prefix length
+                "P": 8,                       # Number of pilot carriers
+                "pilot_value": self._complex_to_dict(1+1j),  # Pilot value
+                "mu": 2,                      # Bits per symbol
+                "mapping_table": self._convert_mapping_table({
+                    (0, 0): -1 - 1j,
+                    (0, 1): -1 + 1j,
+                    (1, 0): 1 - 1j,
+                    (1, 1): 1 + 1j,
+                }),  # Mapping table
+                "demapping_table": None,      # Demapping table (auto-calculated)
+                "num_path": 16,               # Number of channel paths
+                "rician_factor": 1,           # Rician factor
+                "num_simulate": 50000,        # Simulation count
+                "num_simulate_target": 5000,  # Target simulation count
+                "num_test_target": 1000,      # Target test count
+                "num_running": 1              # Number of runs
             },
             
-            # 信号和信道参数
+            # Signal and channel parameters
             "signal": {
-                "SNR": 10,                                                # 信噪比(dB)
+                "SNR": 10,                    # Signal-to-noise ratio (dB)
             },
             
-            # 数据集配置
+            # Dataset configuration
             "dataset": {
-                "train_samples": 64000,                                   # 训练样本数量
-                "test_samples": 2500,                                     # 测试数据集大小
-                "val_samples": 300,                                     # 3GPP验证数据集大小
-                "channel_types": ["awgn", "rician", "rayleigh", "random_mixed"], # 标准训练信道
-                "meta_channel_types": ["awgn", "rician", "rayleigh"],      # 元学习信道
-                "test_channel": "3gpp",                                   # 泛化测试信道
-                "fine_tuning_sizes": [50, 100, 500, 1000]                 # 微调样本大小
+                "train_samples": 64000,                                   # Number of training samples
+                "test_samples": 2500,                                     # Test dataset size
+                "val_samples": 300,                                       # 3GPP validation dataset size
+                "channel_types": ["awgn", "rician", "rayleigh", "random_mixed"], # Standard training channels
+                "meta_channel_types": ["awgn", "rician", "rayleigh"],      # Meta-learning channels
+                "test_channel": "WINNER",                                   # Generalization test channel
+                "fine_tuning_sizes": [50, 100, 500, 1000, 64000]          # Fine-tuning sample sizes
             },
             
-            # DNN模型参数
+            # DNN model parameters
             "dnn": {
-                "architecture": [256, 512, 256],                          # 隐藏层大小
-                "activations": ["relu", "relu", "relu", "sigmoid"],       # 激活函数
-                "optimizer": "adam",                                      # 优化器
-                "learning_rate": self.global_params.get("learning_rate", 0.001),  # 学习率
-                "loss": "mse",                                           # 损失函数
-                "epochs": 10,                                             # 训练周期数
-                "batch_size": self.global_params.get("batch_size", 32)    # 批量大小
+                "architecture": [256, 512, 256],                          # Hidden layer sizes
+                "activations": ["relu", "relu", "relu", "sigmoid"],       # Activation functions
+                "optimizer": "adam",                                      # Optimizer
+                "learning_rate": 0.001,                                   # Learning rate from global_parameters.py
+                "loss": "mse",                                            # Loss function
+                "epochs": 10,                                             # Number of training epochs from global_parameters.py
+                "batch_size": 32                                          # Batch size from global_parameters.py
             },
             
-            # 元学习参数
+            # Meta-learning parameters
             "meta_dnn": {
-                "inner_lr": 0.02,                                         # 内循环学习率
-                "meta_lr": 0.3,                                           # 元学习率
-                "mini_batch_size": 32,                                    # 小批量大小
-                "task_steps": 50,                                         # 任务步骤数
-                "early_stopping": True,                                   # 是否启用早停
-                "patience": 20,                                           # 早停耐心值
-                "min_delta": 0.0002,                                      # 最小改进阈值
-                "abs_threshold": 0.011,                                   # 绝对阈值
-                "progressive_patience": True,                             # 动态耐心
-                "verbose": 1,                                             # 详细程度
+                "inner_lr": 0.02,                                         # Inner loop learning rate
+                "meta_lr": 0.3,                                           # Meta learning rate
+                "mini_batch_size": 32,                                    # Mini-batch size
+                "task_steps": 50,                                         # Number of task steps
+                "early_stopping": True,                                   # Whether to enable early stopping
+                "patience": 20,                                           # Early stopping patience
+                "min_delta": 0.0002,                                      # Minimum improvement threshold
+                "abs_threshold": 0.011,                                   # Absolute threshold
+                "progressive_patience": True,                             # Dynamic patience
+                "verbose": 1,                                             # Verbosity level
                 "lr_schedule": {
-                    "first_decay_steps": 500,                             # 首次衰减步骤
-                    "t_mul": 1.1,                                         # t乘数
-                    "m_mul": 1,                                           # m乘数
-                    "alpha": 0.001                                        # alpha值
+                    "first_decay_steps": 500,                             # First decay steps
+                    "t_mul": 1.1,                                         # t multiplier
+                    "m_mul": 1,                                           # m multiplier
+                    "alpha": 0.001                                        # alpha value
                 }
             },
             
-            # 微调参数
+            # Fine-tuning parameters
             "fine_tuning": {
-                "epochs": 1,                                              # 微调周期数
-                "batch_sizes": {                                          # 不同样本量的批量大小
+                "epochs": {
+                    "50": 1,
+                    "100": 1, 
+                    "500": 1,
+                    "1000": 1,
+                    "64000": 10
+                },                                                        # Fine-tuning epochs
+                "batch_sizes": {                                          # Batch sizes for different sample amounts
                     "50": 5,
                     "100": 5, 
                     "500": 16,
-                    "1000": 32
+                    "1000": 32,
+                    "64000": 32
                 }
             },
             
-            # 随机种子，用于可复现性
+            # Random seed for reproducibility
             "seed": 42,
             
-            # 计算参数
-            "gpu_memory_growth": True,                                    # 是否启用GPU内存增长
+            # Computation parameters
+            "gpu_memory_growth": True,                                    # Whether to enable GPU memory growth
             
-            # 输出配置
+            # Output configuration
             "output": {
-                "save_plots": True,                                       # 是否保存图表
-                "plot_dpi": 300,                                          # 图表DPI
-                "log_dir": "experiment_logs",                             # 日志目录
-                "sampling_rate": 10,                                      # 指标采样率
-                "max_points": 1000                                        # 最大记录点数
+                "save_plots": True,                                       # Whether to save plots
+                "plot_dpi": 300,                                          # Plot DPI
+                "log_dir": "experiment_logs",                             # Log directory
+                "sampling_rate": 10,                                      # Metrics sampling rate
+                "max_points": 1000                                        # Maximum record points
             }
         }
         
-        # 计算反映射表
+        # Calculate demapping table
         self._update_demapping_table()
     
     def _complex_to_dict(self, complex_val):
-        """将复数转换为字典表示"""
+        """
+        Convert complex number to dictionary representation
+        
+        Args:
+            complex_val: Complex value to convert
+        
+        Returns:
+            Dictionary representation of the complex value
+        """
         if isinstance(complex_val, complex):
             return {"real": complex_val.real, "imag": complex_val.imag}
         return complex_val
     
     def _dict_to_complex(self, dict_val):
-        """将字典表示转换为复数"""
+        """
+        Convert dictionary representation to complex number
+        
+        Args:
+            dict_val: Dictionary to convert
+        
+        Returns:
+            Complex number from dictionary
+        """
         if isinstance(dict_val, dict) and "real" in dict_val and "imag" in dict_val:
             return complex(dict_val["real"], dict_val["imag"])
         return dict_val
     
     def _convert_mapping_table(self, mapping_table):
-        """转换映射表为可序列化格式"""
+        """
+        Convert mapping table to serializable format
+        
+        Args:
+            mapping_table: Original mapping table
+        
+        Returns:
+            Mapping table in serializable format
+        """
         result = {}
         for k, v in mapping_table.items():
-            # 将元组键转换为字符串
+            # Convert tuple keys to strings
             str_key = str(k)
-            # 将复数值转换为字典
+            # Convert complex values to dictionaries
             result[str_key] = self._complex_to_dict(v)
         return result
     
     def _restore_mapping_table(self, mapping_dict):
-        """还原映射表为原始格式"""
+        """
+        Restore mapping table to original format
+        
+        Args:
+            mapping_dict: Serialized mapping dictionary
+        
+        Returns:
+            Original format mapping table
+        """
         result = {}
         for k, v in mapping_dict.items():
-            # 将字符串键转换回元组
+            # Convert string keys back to tuples
             if k.startswith('(') and k.endswith(')'):
-                # 解析如 "(0, 1)" 格式的字符串
+                # Parse strings in format "(0, 1)"
                 try:
                     tuple_key = eval(k)
                 except:
-                    # 如果解析失败，使用原始键
+                    # If parsing fails, use original key
                     tuple_key = k
             else:
                 tuple_key = k
             
-            # 将字典值转换回复数
+            # Convert dictionary values back to complex numbers
             result[tuple_key] = self._dict_to_complex(v)
         return result
     
     def _update_demapping_table(self):
-        """更新反映射表"""
+        """Update the demapping table based on the mapping table"""
         mapping_table = self._restore_mapping_table(self.config["global"]["mapping_table"])
         demapping_table = {v: k for k, v in mapping_table.items()}
         self.config["global"]["demapping_table"] = self._convert_mapping_table(demapping_table)
     
-    def _load_global_params(self, filepath):
-        """从全局参数文件加载参数"""
-        if not os.path.exists(filepath):
-            print(f"警告: 全局参数文件 {filepath} 不存在，使用默认值")
-            return {}
-        
-        try:
-            # 从Python文件中加载变量
-            spec = importlib.util.spec_from_file_location("global_params", filepath)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            
-            # 提取模块中的所有变量
-            params = {name: getattr(module, name) for name in dir(module) 
-                     if not name.startswith('__') and not callable(getattr(module, name))}
-            
-            return params
-        except Exception as e:
-            print(f"加载全局参数文件时出错: {str(e)}")
-            return {}
-    
     def update_from_dict(self, config_dict):
-        """从字典更新配置"""
+        """
+        Update configuration from dictionary
+        
+        Args:
+            config_dict: Dictionary with new configuration values
+        """
         def update_nested_dict(d, u):
             for k, v in u.items():
                 if isinstance(v, dict) and k in d and isinstance(d[k], dict):
@@ -196,11 +217,16 @@ class ExperimentConfig:
                     d[k] = v
         
         update_nested_dict(self.config, config_dict)
-        # 更新反映射表
+        # Update demapping table
         self._update_demapping_table()
     
     def get_simulator_params(self):
-        """获取信号模拟器参数"""
+        """
+        Get signal simulator parameters
+        
+        Returns:
+            Dictionary of simulator parameters
+        """
         return {
             "SNR": self.config["signal"]["SNR"],
             "K": self.config["global"]["K"],
@@ -212,121 +238,148 @@ class ExperimentConfig:
         }
     
     def get_dnn_params(self):
-        """获取DNN参数"""
+        """
+        Get DNN parameters
+        
+        Returns:
+            Dictionary of DNN parameters
+        """
         return self.config["dnn"]
     
     def get_meta_dnn_params(self):
-        """获取MetaDNN参数"""
+        """
+        Get MetaDNN parameters
+        
+        Returns:
+            Dictionary of MetaDNN parameters
+        """
         return self.config["meta_dnn"]
     
     def get_dataset_params(self):
-        """获取数据集参数"""
+        """
+        Get dataset parameters
+        
+        Returns:
+            Dictionary of dataset parameters
+        """
         return self.config["dataset"]
     
     def get_fine_tuning_params(self):
-        """获取微调参数"""
+        """
+        Get fine-tuning parameters
+        
+        Returns:
+            Dictionary of fine-tuning parameters
+        """
         return self.config["fine_tuning"]
     
     def get_output_params(self):
-        """获取输出参数"""
+        """
+        Get output parameters
+        
+        Returns:
+            Dictionary of output parameters
+        """
         return self.config["output"]
     
     def create_global_module(self):
         """
-        创建全局参数模块，与原始 global_parameters.py 兼容
+        Create global parameters module compatible with original global_parameters.py
         
-        返回:
-            包含全局参数的模块对象
+        Returns:
+            Module object containing global parameters
         """
-        # 创建一个空的模块
+        # Create an empty module
         module = type('GlobalParameters', (), {})
         
-        # 添加基本参数
+        # Add basic parameters
         for key, value in self.config["global"].items():
             if key == "mapping_table":
-                # 特殊处理映射表
+                # Special handling for mapping table
                 mapping_table = self._restore_mapping_table(value)
                 setattr(module, key, mapping_table)
             elif key == "demapping_table":
-                # 特殊处理反映射表
+                # Special handling for demapping table
                 if value:
                     demapping_table = self._restore_mapping_table(value)
                     setattr(module, key, demapping_table)
             elif key == "pilot_value":
-                # 特殊处理导频值
+                # Special handling for pilot value
                 setattr(module, key, self._dict_to_complex(value))
             else:
                 setattr(module, key, value)
         
-        # 添加信号参数
+        # Add signal parameters
         for key, value in self.config["signal"].items():
-            setattr(module, "SNRdb", value)  # 使用原始名称
+            setattr(module, "SNRdb", value)  # Use original name
         
-        # 添加其他必要参数
+        # Add other necessary parameters
         setattr(module, "learning_rate", self.config["dnn"]["learning_rate"])
         setattr(module, "batch_size", self.config["dnn"]["batch_size"])
+        setattr(module, "num_epochs", self.config["dnn"]["epochs"])
         
         return module
     
     def export_to_global_parameters(self, output_file="new_global_parameters.py"):
         """
-        将配置导出为与 global_parameters.py 兼容的格式
+        Export configuration to a format compatible with global_parameters.py
         
-        参数:
-            output_file: 输出文件路径
+        Args:
+            output_file: Output file path
         
-        返回:
-            导出的文件路径
+        Returns:
+            Path to the exported file
         """
         try:
             with open(output_file, 'w') as f:
-                # 写入全局参数
+                # Write global parameters
                 for key, value in self.config["global"].items():
                     if key == "mapping_table":
-                        # 特殊处理映射表
+                        # Special handling for mapping table
                         mapping_table = self._restore_mapping_table(value)
                         f.write(f"{key} = ")
                         f.write(pprint.pformat(mapping_table, indent=4))
                         f.write("\n\n")
                     elif key == "demapping_table":
-                        # 跳过反映射表，稍后计算
+                        # Skip demapping table, calculate later
                         continue
                     elif key == "pilot_value":
-                        # 特殊处理导频值
+                        # Special handling for pilot value
                         complex_val = self._dict_to_complex(value)
                         f.write(f"{key} = {complex_val!r}\n")
                     else:
                         f.write(f"{key} = {value!r}\n")
                 
-                # 写入反映射表
-                f.write("\n# 从映射表自动计算反映射表\n")
+                # Write demapping table
+                f.write("\n# Automatically calculate demapping table from mapping table\n")
                 f.write("demapping_table = {v: k for k, v in mapping_table.items()}\n")
                 
-                # 写入其他必要参数
+                # Write other necessary parameters
                 f.write(f"\nSNRdb = {self.config['signal']['SNR']}\n")
                 f.write(f"learning_rate = {self.config['dnn']['learning_rate']}\n")
                 f.write(f"batch_size = {self.config['dnn']['batch_size']}\n")
+                f.write(f"num_epochs = {self.config['dnn']['epochs']}\n")
             
-            print(f"全局参数已导出到: {output_file}")
+            print(f"Global parameters exported to: {output_file}")
             return output_file
         
         except Exception as e:
-            print(f"导出全局参数时出错: {str(e)}")
+            print(f"Error exporting global parameters: {str(e)}")
             return None
     
     def inject_globals(self, target_module=None):
         """
-        将配置中的全局参数注入到模块或全局命名空间
+        Inject global parameters from configuration into a module or global namespace
         
-        参数:
-            target_module: 目标模块，如果为None则使用globals()
+        Args:
+            target_module: Target module, if None uses globals()
         """
         if target_module is None:
             target_module = globals()
         
         module = self.create_global_module()
         
-        # 将所有属性注入到目标命名空间
+        # Inject all attributes into target namespace
         for name in dir(module):
             if not name.startswith('__'):
                 value = getattr(module, name)
@@ -337,95 +390,104 @@ class ExperimentConfig:
     
     def save_to_file(self, filepath=None, add_timestamp=True):
         """
-        将配置保存到文件
+        Save configuration to file
         
-        参数:
-            filepath: 文件路径，如果为None则使用默认路径
-            add_timestamp: 是否在文件名中添加时间戳
+        Args:
+            filepath: File path, if None uses default path
+            add_timestamp: Whether to add timestamp to filename
         
-        返回:
-            保存的文件路径
+        Returns:
+            Path to the saved file
         """
         try:
-            # 确定文件保存路径
+            # Determine file save path
             if filepath is None:
-                # 默认在当前目录创建experiment_configs文件夹
+                # Default to creating experiment_configs folder in current directory
                 config_dir = "experiment_configs"
                 if not os.path.exists(config_dir):
                     os.makedirs(config_dir)
                 
-                # 添加时间戳
+                # Add timestamp
                 timestamp = ""
                 if add_timestamp:
                     timestamp = f"_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 
                 filepath = os.path.join(config_dir, f"ofdm_config{timestamp}.json")
             
-            # 确保目录存在
+            # Ensure directory exists
             os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
             
-            # 保存为JSON
+            # Save as JSON
             with open(filepath, 'w') as f:
                 json.dump(self.config, f, indent=4)
             
-            print(f"配置已保存到: {filepath}")
+            print(f"Configuration saved to: {filepath}")
             return filepath
         
         except Exception as e:
-            print(f"保存配置文件时出错: {str(e)}")
+            print(f"Error saving configuration file: {str(e)}")
             return None
     
     def save_as_python(self, filepath=None, add_timestamp=True):
-        """将配置保存为Python文件"""
+        """
+        Save configuration as Python file
+        
+        Args:
+            filepath: File path, if None uses default path
+            add_timestamp: Whether to add timestamp to filename
+        
+        Returns:
+            Path to the saved file
+        """
         try:
-            # 确定文件保存路径
+            # Determine file save path
             if filepath is None:
-                # 默认在当前目录创建experiment_configs文件夹
+                # Default to creating experiment_configs folder in current directory
                 config_dir = "experiment_configs"
                 if not os.path.exists(config_dir):
                     os.makedirs(config_dir)
                 
-                # 添加时间戳
+                # Add timestamp
                 timestamp = ""
                 if add_timestamp:
                     timestamp = f"_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 
                 filepath = os.path.join(config_dir, f"ofdm_config{timestamp}.py")
             
-            # 确保目录存在
+            # Ensure directory exists
             os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
             
-            # 写入Python格式
+            # Write Python format
             with open(filepath, 'w') as f:
-                f.write("# OFDM信号检测实验配置\n")
-                f.write("# 生成时间: {}\n\n".format(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+                f.write("# OFDM Signal Detection Experiment Configuration\n")
+                f.write("# Generated: {}\n\n".format(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
                 f.write("experiment_config = ")
-                # 使用pprint格式化配置字典
+                # Use pprint to format configuration dictionary
                 formatted_config = pprint.pformat(self.config, indent=4, width=100)
                 f.write(formatted_config)
             
-            print(f"配置已保存到: {filepath}")
+            print(f"Configuration saved to: {filepath}")
             return filepath
         
         except Exception as e:
-            print(f"保存配置文件时出错: {str(e)}")
+            print(f"Error saving configuration file: {str(e)}")
             return None
     
     @classmethod
     def load_from_file(cls, filepath):
         """
-        从文件加载配置
+        Load configuration from file
         
-        参数:
-            filepath: 配置文件路径
+        Args:
+            filepath: Configuration file path
         
-        返回:
-            配置对象
+        Returns:
+            Configuration object
         """
         try:
-            config_obj = cls()  # 创建默认配置对象
+            config_obj = cls()  # Create default configuration object
             
-            # 判断文件类型并加载
+            # Determine file type and load
             if filepath.endswith('.json'):
                 with open(filepath, 'r') as f:
                     loaded_config = json.load(f)
@@ -433,7 +495,7 @@ class ExperimentConfig:
                 config_obj.update_from_dict(loaded_config)
             
             elif filepath.endswith('.py'):
-                # 从Python文件加载
+                # Load from Python file
                 namespace = {}
                 with open(filepath, 'r') as f:
                     exec(f.read(), {}, namespace)
@@ -441,32 +503,51 @@ class ExperimentConfig:
                 if 'experiment_config' in namespace:
                     config_obj.update_from_dict(namespace['experiment_config'])
                 else:
-                    raise ValueError("Python配置文件中找不到experiment_config变量")
+                    raise ValueError("Could not find experiment_config variable in Python configuration file")
             
             else:
-                raise ValueError(f"不支持的文件类型: {filepath}")
+                raise ValueError(f"Unsupported file type: {filepath}")
             
-            print(f"配置已从 {filepath} 加载")
+            print(f"Configuration loaded from {filepath}")
             return config_obj
         
         except Exception as e:
-            print(f"加载配置文件时出错: {str(e)}")
+            print(f"Error loading configuration file: {str(e)}")
             return None
     
     def __str__(self):
-        """配置的字符串表示"""
+        """String representation of configuration"""
         return pprint.pformat(self.config, indent=4)
 
-# 应用实例
+# Application examples
 def apply_config_to_simulator(simulator, config):
-    """应用配置到信号模拟器"""
+    """
+    Apply configuration to signal simulator
+    
+    Args:
+        simulator: Signal simulator instance
+        config: Configuration object
+        
+    Returns:
+        Configured simulator instance
+    """
     signal_params = config.get_simulator_params()
     simulator.SNRdB = signal_params.get("SNR", 10)
-    # 其他参数通过全局注入方式应用
+    # Other parameters applied through global injection
     return simulator
 
 def create_meta_dnn_from_config(input_dim, payloadBits_per_OFDM, config):
-    """从配置创建MetaDNN模型"""
+    """
+    Create MetaDNN model from configuration
+    
+    Args:
+        input_dim: Input dimension
+        payloadBits_per_OFDM: Payload bits per OFDM symbol
+        config: Configuration object
+        
+    Returns:
+        Configured MetaDNN model
+    """
     meta_params = config.get_meta_dnn_params()
     lr_schedule = meta_params.get("lr_schedule", {})
     
@@ -488,26 +569,26 @@ def create_meta_dnn_from_config(input_dim, payloadBits_per_OFDM, config):
         verbose=meta_params.get("verbose", 1)
     )
 
-# 使用示例
+# Usage example
 if __name__ == "__main__":
-    # 创建默认配置
+    # Create default configuration
     config = ExperimentConfig()
     
-    # 修改配置
-    config.config["global"]["K"] = 128  # 更改子载波数量
+    # Modify configuration
+    config.config["global"]["K"] = 128  # Change number of subcarriers
     config.config["meta_dnn"]["abs_threshold"] = 0.01
     
-    # 保存配置
+    # Save configuration
     config.save_to_file()
     
-    # 导出为全局参数文件
+    # Export as global parameters file
     config.export_to_global_parameters()
     
-    # 模拟全局参数注入
+    # Simulate global parameter injection
     test_dict = {}
     config.inject_globals(test_dict)
-    print(f"注入后的K值: {test_dict['K']}")
+    print(f"K value after injection: {test_dict['K']}")
     
-    # 输出配置
-    print("\n配置内容:")
+    # Output configuration
+    print("\nConfiguration content:")
     print(config)

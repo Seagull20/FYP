@@ -12,16 +12,33 @@ layers = keras.layers
 Callback = keras.callbacks.Callback
 import matplotlib.pyplot as plt
 import time
+import gc
+from datetime import datetime
 
 class MultiModelBCP(Callback):
+    """
+    A custom Keras callback for tracking and comparing multiple models' training metrics.
+    This callback efficiently collects, stores, and visualizes training and validation metrics
+    across different models, enabling easy comparison of model performance.
+    """
+
     def __init__(self, model_name, dataset_type="default", sampling_rate=10, max_points=1000):
+        """
+        Initialize the MultiModelBCP callback.
+
+        Args:
+            model_name (str): Unique identifier for the model being tracked
+            dataset_type (str): Type of dataset used for training (default: "default")
+            sampling_rate (int): How often to sample metrics (every N batches)
+            max_points (int): Maximum number of data points to store to manage memory
+        """
         super(MultiModelBCP, self).__init__()
         self.model_name = model_name
         self.dataset_type = dataset_type
-        self.sampling_rate = sampling_rate  # 每隔多少批次记录一次
-        self.max_points = max_points  # 最大记录点数
+        self.sampling_rate = sampling_rate  # Sample every N batches
+        self.max_points = max_points  # Maximum number of data points to record
         
-        # 使用下采样的度量标准
+        # Downsampled metrics
         self.batch_loss = []
         self.batch_bit_err = []
         self.epoch_loss = []
@@ -42,15 +59,23 @@ class MultiModelBCP(Callback):
         self.batch_counter = 0
 
     def on_train_batch_end(self, batch, logs=None):
+        """
+        Capture metrics at the end of each training batch.
+        Implements downsampling to manage memory usage.
+
+        Args:
+            batch: Current batch index
+            logs: Dictionary containing batch metrics
+        """
         logs = logs or {}
         self.current_update_count += 1
         self.batch_counter += 1
         
-        # 只在采样点记录指标
+        # Only record metrics at sampling points
         if self.batch_counter % self.sampling_rate == 0:
-            # 处理最大点数限制，如果需要，删除旧数据
+            # Handle maximum points limit, remove old data if needed
             if len(self.batch_loss) >= self.max_points:
-                # 移除一半的旧数据点以节省内存
+                # Remove half of the old data points to save memory
                 self.batch_loss = self.batch_loss[len(self.batch_loss)//2:]
                 self.batch_bit_err = self.batch_bit_err[len(self.batch_bit_err)//2:]
                 self.update_counts = self.update_counts[len(self.update_counts)//2:]
@@ -64,19 +89,34 @@ class MultiModelBCP(Callback):
             self.metrics_by_updates["bit_err"].append(logs.get('bit_err', 0))
 
     def on_epoch_end(self, epoch, logs=None):
+        """
+        Capture metrics at the end of each training epoch.
+        Records both training and validation metrics.
+
+        Args:
+            epoch: Current epoch index
+            logs: Dictionary containing epoch metrics
+        """
         logs = logs or {}
         self.epoch_loss.append(logs.get('loss', 0))
         self.epoch_bit_err.append(logs.get('bit_err', 0))
         self.val_epoch_loss.append(logs.get('val_loss', 0))
         self.val_epoch_bit_err.append(logs.get('val_bit_err', 0))
         
-        # 记录验证指标
+        # Record validation metrics
         self.metrics_by_updates["val_loss"].append(logs.get('val_loss', 0))
         self.metrics_by_updates["val_bit_err"].append(logs.get('val_bit_err', 0))
         self.metrics_by_updates["val_update_counts"].append(self.current_update_count)
 
     def on_train_end(self, logs=None):
-        # 保存数据到静态字典
+        """
+        Save collected metrics to the static dictionary and clean up resources.
+        This method is called when model training ends.
+
+        Args:
+            logs: Dictionary containing final metrics
+        """
+        # Save data to static dictionary
         MultiModelBCP.all_models_data[self.model_name] = {
             "batch_loss": self.batch_loss,
             "batch_bit_err": self.batch_bit_err,
@@ -90,7 +130,7 @@ class MultiModelBCP(Callback):
             "dataset_type": self.dataset_type
         }
         
-        # 清除实例变量以释放内存
+        # Clear instance variables to free memory
         self.batch_loss = []
         self.batch_bit_err = []
         self.update_counts = []
@@ -104,7 +144,17 @@ class MultiModelBCP(Callback):
 
     @staticmethod
     def log_manual_data(model_name, epoch_loss, val_bit_err, update_counts=None, dataset_type="meta"):
-        """Record MetaDNN metrics with update counts"""
+        """
+        Manually record metrics for models that are not trained with Keras fit method.
+        Useful for meta-learning algorithms or external models.
+
+        Args:
+            model_name (str): Unique identifier for the model
+            epoch_loss (list or float): Loss values to record
+            val_bit_err (list or float): Validation bit error rates to record
+            update_counts (list or int, optional): Parameter update counts. If None, will be auto-generated.
+            dataset_type (str): Type of dataset used for training (default: "meta")
+        """
         # Convert inputs to lists if they're not already
         if isinstance(epoch_loss, (tf.Tensor, np.ndarray)):
             epoch_loss = epoch_loss.numpy() if hasattr(epoch_loss, 'numpy') else epoch_loss
@@ -152,53 +202,22 @@ class MultiModelBCP(Callback):
         print(f"Logged {len(epoch_loss_list)} loss values and {len(val_bit_err_list)} validation error values for {model_name}")
         print(f"Final update count: {update_counts[-1] if update_counts else 0}")
 
-    @staticmethod
-    def plot_all_learning_curves(save_path="multi_model_learning_curve.png", 
-                                 plot_batch=True, plot_epoch=True, plot_train_bit_err=False):
-        if not MultiModelBCP.all_models_data:
-            print("No data to plot.")
-            return
-
-        num_plots = plot_batch + plot_epoch
-        if num_plots == 0:
-            print("No plots selected.")
-            return
-        plt.figure(figsize=(6 * num_plots, 5))
-
-        plot_idx = 1
-        if plot_batch:
-            plt.subplot(1, num_plots, plot_idx)
-            for model_name, data in MultiModelBCP.all_models_data.items():
-                if data["batch_loss"]:
-                    plt.plot(data["batch_loss"], label=f"{model_name} Loss")
-                    plt.plot(np.linspace(0, len(data["batch_loss"]), len(data["epoch_bit_err"])),
-                             data["epoch_bit_err"], label=f"{model_name} Bit Err", alpha=0.6)
-            plt.title("Batch-Level Learning Curves (Train Phase)")
-            plt.xlabel("Batch Index")
-            plt.ylabel("Metric Value")
-            plt.legend()
-            plot_idx += 1
-
-        if plot_epoch:
-            plt.subplot(1, num_plots, plot_idx)
-            for model_name, data in MultiModelBCP.all_models_data.items():
-                plt.plot(data["val_epoch_bit_err"], label=f"{model_name} Val Bit Err",
-                         marker='o' if len(data["val_epoch_bit_err"]) == 1 else None)
-                if plot_train_bit_err and data["epoch_bit_err"]:
-                    plt.plot(data["epoch_bit_err"], label=f"{model_name} Bit Err", linestyle="--")
-            plt.title("Epoch-Level Learning Curves (Train + Generalization)")
-            plt.xlabel("Epoch")
-            plt.ylabel("Bit Error Rate")
-            plt.legend()
-
-        plt.tight_layout(pad=3.0)
-        plt.savefig(save_path)
-        plt.close()
-        print(f"Multi-model learning curves saved to {save_path}")
 
     @staticmethod
     def plot_by_updates(save_path="update_comparison.png", models_to_plot=None, dpi=150):
-        """绘制基于更新的学习曲线，可以选择性地只绘制部分模型"""
+        """
+        Plot learning curves based on parameter updates for direct comparison between models.
+        Particularly useful for comparing models trained with different batch sizes or optimizers.
+        
+        Args:
+            save_path (str): Path to save the generated plot
+            models_to_plot (list, optional): List of model names to include in the plot.
+                                            If None, all models will be plotted.
+            dpi (int): Resolution of the saved plot in dots per inch
+            
+        Returns:
+            None: Saves the plot to the specified path
+        """
         if not MultiModelBCP.all_models_data:
             print("No data to plot.")
             return
@@ -206,7 +225,7 @@ class MultiModelBCP(Callback):
         plt.figure(figsize=(10, 8))
         
         for model_name, data in MultiModelBCP.all_models_data.items():
-            # 如果指定了models_to_plot，则只绘制指定的模型
+            # If models_to_plot is specified, only plot the specified models
             if models_to_plot and model_name not in models_to_plot:
                 continue
                 
@@ -231,7 +250,16 @@ class MultiModelBCP(Callback):
 
     @staticmethod
     def clear_data(model_names=None):
-        """清除所有或指定模型的数据"""
+        """
+        Clear stored data for all models or specific models.
+        
+        Args:
+            model_names (list, optional): List of model names to clear data for.
+                                         If None, all data will be cleared.
+                                         
+        Returns:
+            None
+        """
         if model_names is None:
             MultiModelBCP.all_models_data = {}
         else:
@@ -239,45 +267,42 @@ class MultiModelBCP(Callback):
                 if name in MultiModelBCP.all_models_data:
                     del MultiModelBCP.all_models_data[name]
 
-    # 将这些方法添加到MultiModelBCP类
-
     @staticmethod
     def export_data_for_matlab(output_dir="matlab_exports", format="all", prefix=""):
         """
-        将所有模型的训练数据导出为MATLAB兼容格式
+        Export training data from all models to MATLAB-compatible formats.
         
-        参数:
-            output_dir: 导出目录路径
-            format: 输出格式 ('csv', 'mat', 'json', 或 'all')
-            prefix: 文件名前缀
+        Args:
+            output_dir (str): Directory path to save exported files
+            format (str): Output format ('csv', 'mat', 'json', or 'all')
+            prefix (str): Prefix for exported filenames
             
-        返回:
-            导出文件的路径列表
+        Returns:
+            list: List of paths to exported files
         """
         from datetime import datetime
         
-        # 如果all_models_data未初始化，提前返回
+        # Return early if all_models_data is not initialized
         if not hasattr(MultiModelBCP, "all_models_data") or not MultiModelBCP.all_models_data:
-            print("警告：没有可导出的模型数据。")
+            print("Warning: No model data available to export.")
             return []
         
-        # 如果未传递前缀，使用时间戳
+        # Use timestamp as prefix if none provided
         if not prefix:
             prefix = f"model_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
         
-        # 导入MatlabExport类
+        # Import MatlabExport class
         try:
-            # 假设MatlabExport类已定义在单独的文件中
+            # Assuming MatlabExport class is defined in a separate file
             from matlab_export import MatlabExport
         except ImportError:
-            # 如果导入失败，我们需要定义MatlabExport类
-            # 在这里粘贴MatlabExport类的代码
-            # 我们将此类的代码移到单独的文件中来保持整洁
+            # If import fails, we would need to define MatlabExport class
+            # Code for MatlabExport class would be pasted here
             pass
         
         exported_files = []
         
-        # 根据请求的格式导出数据
+        # Export data based on requested format
         if format.lower() in ["csv", "all"]:
             csv_files = MatlabExport.export_to_csv(
                 MultiModelBCP.all_models_data, 
@@ -285,7 +310,7 @@ class MultiModelBCP(Callback):
                 prefix=prefix
             )
             exported_files.extend(csv_files)
-            print(f"已导出{len(csv_files)}个CSV文件到 {output_dir}")
+            print(f"Exported {len(csv_files)} CSV files to {output_dir}")
         
         if format.lower() in ["mat", "all"]:
             try:
@@ -296,9 +321,9 @@ class MultiModelBCP(Callback):
                 )
                 exported_files.extend(mat_files)
                 if mat_files:
-                    print(f"已导出MAT文件到 {mat_files[0]}")
+                    print(f"Exported MAT file to {mat_files[0]}")
             except Exception as e:
-                print(f"导出MAT文件时出错: {e}")
+                print(f"Error exporting MAT file: {e}")
         
         if format.lower() in ["json", "all"]:
             json_files = MatlabExport.export_to_json(
@@ -307,7 +332,7 @@ class MultiModelBCP(Callback):
                 prefix=prefix
             )
             exported_files.extend(json_files)
-            print(f"已导出JSON文件到 {json_files[0]}")
+            print(f"Exported JSON file to {json_files[0]}")
         
         return exported_files
 
@@ -315,16 +340,16 @@ class MultiModelBCP(Callback):
     def generate_matlab_script(output_dir="matlab_exports", exported_files=None, prefix="", 
                             sample_sizes=None):
         """
-        生成一个MATLAB脚本，用于加载和分析导出的数据
+        Generate a MATLAB script for loading and analyzing exported data
         
-        参数:
-            output_dir: 导出目录路径
-            exported_files: 导出文件的路径列表
-            prefix: 文件名前缀
-            sample_sizes: 样本大小列表，如[50, 100, 500, 1000]
+        Parameters:
+            output_dir: Export directory path
+            exported_files: List of exported file paths
+            prefix: File name prefix
+            sample_sizes: List of sample sizes, such as [50, 100, 500, 1000]
             
-        返回:
-            MATLAB脚本文件的路径
+        Returns:
+            Path to the MATLAB script file
         """
         from datetime import datetime
         import os
@@ -352,36 +377,36 @@ class MultiModelBCP(Callback):
             f.write("set(0, 'DefaultAxesFontSize', 12);\n")
             f.write("set(0, 'DefaultLineLineWidth', 1.5);\n\n")
             
-            # 添加样本大小数组定义
+            # Add sample size array definition
             if sample_sizes:
-                f.write("% 定义样本大小数组\n")
+                f.write("% Define sample size array\n")
                 f.write(f"sample_sizes = [{', '.join(map(str, sample_sizes))}];\n\n")
                 
-            # 根据导出的文件格式添加加载代码
+             # Add loading code based on exported file formats
             if has_mat:
-                # 找到第一个.mat文件
+                # Find the first .mat file
                 mat_files = [f for f in exported_files if f.endswith('.mat')]
                 if mat_files:
                     mat_file_basename = os.path.basename(mat_files[0])
-                    f.write("% 加载MAT文件数据\n")
+                    f.write("% Load MAT file data\n")
                     f.write(f"load('{mat_file_basename}');\n\n")
 
-                    f.write("% 获取并显示所有模型名称\n")
-                    f.write("vars = whos;\n")  # 使用whos来获取加载的变量信息
-                    f.write("model_names = {vars.name};\n")  # 提取变量名称
-                    f.write("fprintf('已加载的模型: \\n');\n")
+                    f.write("% Get and display all model names\n")
+                    f.write("vars = whos;\n")  # Use whos to get information about loaded variables
+                    f.write("model_names = {vars.name};\n")  # Extract variable names
+                    f.write("fprintf('Loaded models: \\n');\n")
                     f.write("for i = 1:length(model_names)\n")
                     f.write("    fprintf('  %s\\n', model_names{i});\n")
                     f.write("end\n\n")
 
-                    f.write("% 创建models结构体，将所有模型放入其中（方便后续处理）\n")
+                    f.write("% Create models struct and put all models in it (for easier processing)\n")
                     f.write("models = struct();\n")
                     f.write("for i = 1:length(model_names)\n")
                     f.write("    models.(model_names{i}) = eval(model_names{i});\n")
                     f.write("end\n\n")
                     
-                    f.write("% 分析验证误差率\n")
-                    f.write("figure('Name', '验证误差率对比', 'Position', [100, 100, 1200, 600]);\n")
+                    f.write("% Analyze validation error rate\n")
+                    f.write("figure('Name', 'Val_BER Comparison', 'Position', [100, 100, 1200, 600]);\n")
                     f.write("hold on;\n")
                     f.write("legends = {};\n")
                     f.write("for i = 1:length(model_names)\n")
@@ -392,23 +417,23 @@ class MultiModelBCP(Callback):
                     f.write("            legends{end+1} = strrep(model_names{i}, '_', '\\_');\n")
                     f.write("        end\n")
                     f.write("    catch e\n")
-                    f.write("        fprintf('处理模型 %s 时出错: %s\\n', model_names{i}, e.message);\n")
+                    f.write("        fprintf('Error processing model %s: %s\\n', model_names{i}, e.message);\n")
                     f.write("    end\n")
                     f.write("end\n")
                     f.write("if ~isempty(legends)\n")
-                    f.write("    xlabel('更新次数');\n")
-                    f.write("    ylabel('验证误差率');\n")
-                    f.write("    title('不同模型在验证集上的误差率对比');\n")
+                    f.write("    xlabel('Update Count');\n")
+                    f.write("    ylabel('Val_BER');\n")
+                    f.write("    title('Comparison of Val_BER on the Val_Set for Different Models');\n")
                     f.write("    grid on;\n")
                     f.write("    legend(legends, 'Location', 'best');\n")
-                    f.write("    set(gca, 'YScale', 'log');\n")  # 使用对数尺度可能更好地显示误差率
+                    f.write("    set(gca, 'YScale', 'log');\n")  # Using log scale may better display error rates
                     f.write("else\n")
-                    f.write("    title('没有找到有效的验证误差率数据');\n")
+                    f.write("    title('No valid validation error rate data found');\n")
                     f.write("end\n")
                     f.write("hold off;\n\n")
                     
-                    f.write("% 分析训练损失\n")
-                    f.write("figure('Name', '训练损失对比', 'Position', [100, 100, 1200, 600]);\n")
+                    f.write("% Analyze training loss\n")
+                    f.write("figure('Name', 'Training Loss Comparison', 'Position', [100, 100, 1200, 600]);\n")
                     f.write("hold on;\n")
                     f.write("legends = {};\n")
                     f.write("for i = 1:length(model_names)\n")
@@ -423,38 +448,38 @@ class MultiModelBCP(Callback):
                     f.write("            legends{end+1} = strrep(model_names{i}, '_', '\\_');\n")
                     f.write("        end\n")
                     f.write("    catch e\n")
-                    f.write("        fprintf('处理模型 %s 训练损失时出错: %s\\n', model_names{i}, e.message);\n")
+                    f.write("        fprintf('Error processing training loss for model %s: %s\\n', model_names{i}, e.message);\n")
                     f.write("    end\n")
                     f.write("end\n")
                     f.write("if ~isempty(legends)\n")
-                    f.write("    xlabel('更新次数');\n")
-                    f.write("    ylabel('训练损失');\n")
-                    f.write("    title('不同模型的训练损失对比');\n")
+                    f.write("    xlabel('Update Count');\n")
+                    f.write("    ylabel('Train Loss');\n")
+                    f.write("    title('Comparison of Training Loss for Different Models');\n")
                     f.write("    grid on;\n")
                     f.write("    legend(legends, 'Location', 'best');\n")
                     f.write("else\n")
-                    f.write("    title('没有找到有效的训练损失数据');\n")
+                    f.write("    title('No valid training loss data found');\n")
                     f.write("end\n")
                     f.write("hold off;\n\n")
                     
-                    # 添加对样本大小比较函数的调用
-                    f.write("% 绘制不同样本大小下各模型的性能比较\n")
+                     # Add call to sample size comparison function
+                    f.write("% Plot performance comparison of models across different sample sizes\n")
                     if sample_sizes:
                         f.write("plot_sample_size_comparison(models, sample_sizes);\n\n")
                     else:
                         f.write("try\n")
-                        f.write("    % 尝试自动提取样本大小并绘制性能比较图\n")
+                        f.write("    % Try to automatically extract sample sizes and plot comparison\n")
                         f.write("    plot_sample_size_comparison(models);\n")
                         f.write("catch e\n")
-                        f.write("    fprintf('绘制样本大小比较图时出错: %s\\n', e.message);\n")
-                        f.write("    fprintf('您可以手动调用: plot_sample_size_comparison(models, [50, 100, 500, 1000])\\n');\n")
+                        f.write("    fprintf('Error plotting sample size comparison: %s\\n', e.message);\n")
+                        f.write("    fprintf('You can manually call: plot_sample_size_comparison(models, [50, 100, 500, 1000])\\n');\n")
                         f.write("end\n\n")
                     
                 else:
-                    f.write("% 未找到.mat文件\n\n")
+                    f.write("% No .mat file found\n\n")
                     
             elif has_json:
-                f.write("% 加载JSON文件数据\n")
+                f.write("% Load JSON file data\n")
                 f.write("try\n")
                 
                 json_files = [f for f in exported_files if f.endswith('.json')]
@@ -464,52 +489,52 @@ class MultiModelBCP(Callback):
                     f.write("    json_str = char(fread(json_file, inf))';\n")
                     f.write("    fclose(json_file);\n")
                     f.write("    model_data = jsondecode(json_str);\n")
-                    f.write("    fprintf('成功加载JSON数据\\n');\n")
+                    f.write("    fprintf('Successfully loaded JSON data\\n');\n")
                     
-                    f.write("    % 获取模型名称\n")
+                    f.write("    % Get model names\n")
                     f.write("    model_names = fieldnames(model_data);\n")
-                    f.write("    fprintf('已加载的模型: \\n');\n")
+                    f.write("    fprintf('Loaded models: \\n');\n")
                     f.write("    for i = 1:length(model_names)\n")
                     f.write("        fprintf('  %s\\n', model_names{i});\n")
                     f.write("    end\n\n")
                     
-                    # 添加JSON数据分析代码
-                    f.write("    % 分析验证误差率\n")
-                    f.write("    figure('Name', 'JSON数据：验证误差率对比', 'Position', [100, 100, 1200, 600]);\n")
+                    # Add JSON data analysis code
+                    f.write("    % Analyze validation error rate\n")
+                    f.write("    figure('Name', 'JSON Data: Validation Error Rate Comparison', 'Position', [100, 100, 1200, 600]);\n")
                     f.write("    hold on;\n")
-                    f.write("    % 分析代码...\n")
+                    f.write("    % Analysis code...\n")
                     
-                    # 添加对样本大小比较函数的调用
-                    f.write("    % 绘制不同样本大小下各模型的性能比较\n")
+                    # Add call to sample size comparison function
+                    f.write("    % Plot performance comparison of models across different sample sizes\n")
                     if sample_sizes:
                         f.write("    plot_sample_size_comparison(model_data, sample_sizes);\n\n")
                     else:
                         f.write("    try\n")
-                        f.write("        % 尝试自动提取样本大小并绘制性能比较图\n")
+                        f.write("        % Try to automatically extract sample sizes and plot comparison\n")
                         f.write("        plot_sample_size_comparison(model_data);\n")
                         f.write("    catch e\n")
-                        f.write("        fprintf('绘制样本大小比较图时出错: %s\\n', e.message);\n")
-                        f.write("        fprintf('您可以手动调用: plot_sample_size_comparison(model_data, [50, 100, 500, 1000])\\n');\n")
+                        f.write("        fprintf('Error plotting sample size comparison: %s\\n', e.message);\n")
+                        f.write("        fprintf('You can manually call: plot_sample_size_comparison(model_data, [50, 100, 500, 1000])\\n');\n")
                         f.write("    end\n\n")
                 
                 f.write("catch e\n")
-                f.write("    fprintf('加载JSON数据失败: %s\\n', e.message);\n")
+                f.write("    fprintf('Failed to load JSON data: %s\\n', e.message);\n")
                 f.write("end\n\n")
                 
             elif has_csv:
-                f.write("% 加载CSV文件数据\n")
+                f.write("% Load CSV file data\n")
                 f.write("csv_files = dir(fullfile(pwd, '*.csv'));\n")
-                f.write("fprintf('找到%d个CSV文件\\n', length(csv_files));\n")
+                f.write("fprintf('Found %d CSV files\\n', length(csv_files));\n")
                 f.write("\n")
-                f.write("% 创建数据结构来保存所有模型的数据\n")
+                f.write("% Create data structure to save all model data\n")
                 f.write("models = struct();\n")
                 f.write("\n")
-                f.write("% 加载所有CSV文件\n")
+                f.write("% Load all CSV files\n")
                 f.write("for i = 1:length(csv_files)\n")
                 f.write("    file_name = csv_files(i).name;\n")
                 f.write("    [~, name, ~] = fileparts(file_name);\n")
                 f.write("    \n")
-                f.write("    % 解析文件名以获取模型名称和数据类型\n")
+                f.write("    % Parse file name to get model name and data type\n")
                 f.write("    parts = strsplit(name, '_');\n")
                 f.write("    if length(parts) >= 2\n")
                 f.write("        model_name = parts{1};\n")
@@ -518,26 +543,26 @@ class MultiModelBCP(Callback):
                 f.write("        end\n")
                 f.write("        data_type = parts{end};\n")
                 f.write("        \n")
-                f.write("        % 创建模型结构（如果不存在）\n")
+                f.write("        % Create model structure (if it doesn't exist)\n")
                 f.write("        if ~isfield(models, model_name)\n")
                 f.write("            models.(model_name) = struct();\n")
                 f.write("        end\n")
                 f.write("        \n")
-                f.write("        % 读取数据\n")
+                f.write("        % Read data\n")
                 f.write("        try\n")
                 f.write("            data = readtable(file_name);\n")
                 f.write("            models.(model_name).(data_type) = data;\n")
-                f.write("            fprintf('已加载: %s (%s)\\n', model_name, data_type);\n")
+                f.write("            fprintf('Loaded: %s (%s)\\n', model_name, data_type);\n")
                 f.write("        catch e\n")
-                f.write("            fprintf('加载文件 %s 失败: %s\\n', file_name, e.message);\n")
+                f.write("            fprintf('Failed to load file %s: %s\\n', file_name, e.message);\n")
                 f.write("        end\n")
                 f.write("    end\n")
                 f.write("end\n\n")
                 
-                f.write("% 检查是否有加载的模型数据\n")
+                f.write("% Check if there is any loaded model data\n")
                 f.write("if ~isempty(fieldnames(models))\n")
-                f.write("    % 绘制验证误差率对比\n")
-                f.write("    figure('Name', '验证误差率对比', 'Position', [100, 100, 1200, 600]);\n")
+                f.write("    % Plot validation error rate comparison\n")
+                f.write("    figure('Name', 'Validation Error Rate Comparison', 'Position', [100, 100, 1200, 600]);\n")
                 f.write("    hold on;\n")
                 f.write("    model_names = fieldnames(models);\n")
                 f.write("    legends = {};\n")
@@ -549,43 +574,43 @@ class MultiModelBCP(Callback):
                 f.write("                legends{end+1} = strrep(model_names{i}, '_', '\\_');\n")
                 f.write("            end\n")
                 f.write("        catch e\n")
-                f.write("            fprintf('处理模型 %s 时出错: %s\\n', model_names{i}, e.message);\n")
+                f.write("            fprintf('Error processing model %s: %s\\n', model_names{i}, e.message);\n")
                 f.write("        end\n")
                 f.write("    end\n")
                 f.write("    if ~isempty(legends)\n")
-                f.write("        xlabel('更新次数');\n")
-                f.write("        ylabel('验证误差率');\n")
-                f.write("        title('不同模型在验证集上的误差率对比');\n")
+                f.write("        xlabel('Update Count');\n")
+                f.write("        ylabel('Validation Error Rate');\n")
+                f.write("        title('Comparison of Error Rates on Validation Set for Different Models');\n")
                 f.write("        grid on;\n")
                 f.write("        legend(legends, 'Location', 'best');\n")
                 f.write("        set(gca, 'YScale', 'log');\n")
                 f.write("    else\n")
-                f.write("        title('没有找到有效的验证数据');\n")
+                f.write("        title('No valid validation data found');\n")
                 f.write("    end\n")
                 f.write("    hold off;\n\n")
                 
-                # 添加对样本大小比较函数的调用
-                f.write("    % 绘制不同样本大小下各模型的性能比较\n")
+                # Add call to sample size comparison function
+                f.write("    % Plot performance comparison of models across different sample sizes\n")
                 if sample_sizes:
                     f.write("    plot_sample_size_comparison(models, sample_sizes);\n\n")
                 else:
                     f.write("    try\n")
-                    f.write("        % 尝试自动提取样本大小并绘制性能比较图\n")
+                    f.write("        % Try to automatically extract sample sizes and plot comparison\n")
                     f.write("        plot_sample_size_comparison(models);\n")
                     f.write("    catch e\n")
-                    f.write("        fprintf('绘制样本大小比较图时出错: %s\\n', e.message);\n")
-                    f.write("        fprintf('您可以手动调用: plot_sample_size_comparison(models, [50, 100, 500, 1000])\\n');\n")
+                    f.write("        fprintf('Error plotting sample size comparison: %s\\n', e.message);\n")
+                    f.write("        fprintf('You can manually call: plot_sample_size_comparison(models, [50, 100, 500, 1000])\\n');\n")
                     f.write("    end\n\n")
                     
                 f.write("else\n")
-                f.write("    fprintf('警告: 未能加载任何模型数据\\n');\n")
+                f.write("    fprintf('Warning: Failed to load any model data\\n');\n")
                 f.write("end\n\n")
                 
-            # 添加数据分析函数
-            f.write("%% 自定义分析函数\n\n")
+            # Add data analysis functions
+            f.write("%% Custom Analysis Functions\n\n")
             
-            # 添加样本大小比较函数
-            f.write("% 函数：比较不同样本大小下各模型的最终性能\n")
+            # Add sample size comparison function
+            f.write("% Function: Compare final performance of different models across sample sizes\n")
             f.write("function plot_sample_size_comparison(models, sample_sizes)\n")
             f.write("    % This function generates a grouped bar chart with sample sizes on the x-axis and\n")
             f.write("    % validation error rate (BER) on the y-axis. Additionally, it connects the corresponding\n")
@@ -675,8 +700,8 @@ class MultiModelBCP(Callback):
             f.write("    set(gca, 'YScale', 'log');\n")
             f.write("end\n\n")
             
-            # 添加辅助函数
-            f.write("% 辅助函数：从模型名称中提取样本大小\n")
+            # Add helper functions
+            f.write("% Helper function: Extract sample sizes from model names\n")
             f.write("function sample_sizes = extract_sample_sizes_from_models(models)\n")
             f.write("    model_names = fieldnames(models);\n")
             f.write("    sample_sizes = [];\n")
@@ -684,7 +709,7 @@ class MultiModelBCP(Callback):
             f.write("    for i = 1:length(model_names)\n")
             f.write("        name = model_names{i};\n")
             f.write("        \n")
-            f.write("        % 查找形如 '_数字_' 的模式\n")
+            f.write("        % Look for pattern like '_number_'\n")
             f.write("        pattern = '_(\d+)_';\n")
             f.write("        matches = regexp(name, pattern, 'tokens');\n")
             f.write("        \n")
@@ -696,9 +721,9 @@ class MultiModelBCP(Callback):
             f.write("                    sample_sizes = [sample_sizes, size_num];\n")
             f.write("                end\n")
             f.write("            end\n")
-            f.write("        elseif contains(name, '_3GPP_')\n")
-            f.write("            % 提取 '_3GPP_数字' 中的数字\n")
-            f.write("            pattern = '_3GPP_(\d+)';\n")
+            f.write("        elseif contains(name, '_WINNER_')\n")
+            f.write("            % Extract number from '_WINNER_number'\n")
+            f.write("            pattern = '_WINNER_(\d+)';\n")
             f.write("            matches = regexp(name, pattern, 'tokens');\n")
             f.write("            if ~isempty(matches)\n")
             f.write("                size_str = matches{1}{1};\n")
@@ -708,7 +733,7 @@ class MultiModelBCP(Callback):
             f.write("                end\n")
             f.write("            end\n")
             f.write("        elseif contains(name, 'Meta_')\n")
-            f.write("            % 提取 'Meta_数字' 中的数字\n")
+            f.write("            % Extract number from 'Meta_number'\n")
             f.write("            pattern = 'Meta_(\d+)';\n")
             f.write("            matches = regexp(name, pattern, 'tokens');\n")
             f.write("            if ~isempty(matches)\n")
@@ -722,42 +747,42 @@ class MultiModelBCP(Callback):
             f.write("    end\n")
             f.write("end\n\n")
             
-            f.write("% 辅助函数：提取基本模型名称（不包含样本大小）\n")
+            f.write("% Helper function: Extract base model name (excluding sample size)\n")
             f.write("function base_name = extract_base_model_name(name)\n")
-            f.write("    % 提取基本模型名称，忽略样本大小部分\n")
+            f.write("    % Extract base model name, ignoring sample size part\n")
             f.write("    \n")
-            f.write("    % 对于DNN类型的模型\n")
+            f.write("    % For DNN-type models\n")
             f.write("    if contains(name, 'DNN_')\n")
-            f.write("        if contains(name, '_3GPP_')\n")
-            f.write("            % DNN_channel_3GPP_size 格式\n")
-            f.write("            parts = strsplit(name, '_3GPP_');\n")
+            f.write("        if contains(name, '_WINNER_')\n")
+            f.write("            % DNN_channel_WINNER_size format\n")
+            f.write("            parts = strsplit(name, '_WINNER_');\n")
             f.write("            base_name = parts{1};\n")
             f.write("        else\n")
-            f.write("            % 只有DNN_channel 格式\n")
+            f.write("            % Only DNN_channel format\n")
             f.write("            base_name = name;\n")
             f.write("        end\n")
-            f.write("    % 对于Meta类型的模型\n")
+            f.write("    % For Meta-type models\n")
             f.write("    elseif contains(name, 'Meta_')\n")
-            f.write("        if ~contains(name, 'Meta_DNN') % 排除Meta_DNN_train这种情况\n")
-            f.write("            % Meta_size 格式，统一使用Meta作为基本名称\n")
+            f.write("        if ~contains(name, 'Meta_DNN') % Exclude cases like Meta_DNN_train\n")
+            f.write("            % Meta_size format, use Meta as base name\n")
             f.write("            base_name = 'Meta';\n")
             f.write("        else\n")
             f.write("            base_name = name;\n")
             f.write("        end\n")
             f.write("    else\n")
-            f.write("        % 其他情况，返回原始名称\n")
+            f.write("        % Other cases, return original name\n")
             f.write("        base_name = name;\n")
             f.write("    end\n")
             f.write("end\n\n")
             
-            f.write("% 辅助函数：查找包含特定基本名称和样本大小的模型\n")
+            f.write("% Helper function: Find model with specific base name and sample size\n")
             f.write("function model_name = find_model_with_size(models, base_name, size_str)\n")
             f.write("    model_names = fieldnames(models);\n")
             f.write("    model_name = '';\n")
             f.write("    \n")
-            f.write("    % 根据基本模型类型尝试不同的匹配模式\n")
+            f.write("    % Try different matching patterns based on base model type\n")
             f.write("    if strcmp(base_name, 'Meta')\n")
-            f.write("        % Meta模型的命名模式为Meta_size\n")
+            f.write("        % Meta model naming pattern is Meta_size\n")
             f.write("        pattern = ['Meta_' size_str '$'];\n")
             f.write("        for i = 1:length(model_names)\n")
             f.write("            if ~isempty(regexp(model_names{i}, pattern, 'once'))\n")
@@ -766,8 +791,8 @@ class MultiModelBCP(Callback):
             f.write("            end\n")
             f.write("        end\n")
             f.write("    else\n")
-            f.write("        % DNN模型的命名模式为DNN_channel_3GPP_size\n")
-            f.write("        pattern = [base_name '_3GPP_' size_str '$'];\n")
+            f.write("        % DNN model naming pattern is DNN_channel_WINNER_size\n")
+            f.write("        pattern = [base_name '_WINNER_' size_str '];\n")
             f.write("        for i = 1:length(model_names)\n")
             f.write("            if ~isempty(regexp(model_names{i}, pattern, 'once'))\n")
             f.write("                model_name = model_names{i};\n")
@@ -777,44 +802,44 @@ class MultiModelBCP(Callback):
             f.write("    end\n")
             f.write("end\n\n")
             
-            f.write("% 辅助函数：提取模型的最终验证误差率\n")
+            f.write("% Helper function: Extract final validation error rate from model\n")
             f.write("function final_error = extract_final_error(model)\n")
             f.write("    if isfield(model, 'metrics_by_updates') && isfield(model.metrics_by_updates, 'val_bit_err') && ~isempty(model.metrics_by_updates.val_bit_err)\n")
-            f.write("        % 使用metrics_by_updates中的数据\n")
+            f.write("        % Use data from metrics_by_updates\n")
             f.write("        final_error = model.metrics_by_updates.val_bit_err(end);\n")
             f.write("    elseif isfield(model, 'val_epoch_bit_err') && ~isempty(model.val_epoch_bit_err)\n")
-            f.write("        % 使用val_epoch_bit_err中的数据\n")
+            f.write("        % Use data from val_epoch_bit_err\n")
             f.write("        final_error = model.val_epoch_bit_err(end);\n")
             f.write("    elseif isfield(model, 'validation') && isfield(model.validation, 'val_bit_err') && ~isempty(model.validation.val_bit_err)\n")
-            f.write("        % 使用CSV导出的validation数据\n")
+            f.write("        % Use validation data exported from CSV\n")
             f.write("        final_error = model.validation.val_bit_err{end};\n")
             f.write("    else\n")
-            f.write("        % 无有效数据\n")
+            f.write("        % No valid data\n")
             f.write("        final_error = NaN;\n")
             f.write("    end\n")
             f.write("end\n\n")
             
-            f.write("% 函数：比较不同样本大小下的模型性能\n")
+            f.write("% Function: Compare model performance across different sample sizes\n")
             f.write("function compare_sample_sizes(models, pattern)\n")
-            f.write("    % 此函数比较不同样本大小下模型的性能\n")
-            f.write("    % 参数:\n")
-            f.write("    %   models - 包含模型数据的结构\n")
-            f.write("    %   pattern - 用于筛选模型的字符串模式 (例如, '3GPP_')\n")
+            f.write("    % This function compares model performance across different sample sizes\n")
+            f.write("    % Parameters:\n")
+            f.write("    %   models - Structure containing model data\n")
+            f.write("    %   pattern - String pattern for filtering models (e.g., 'WINNER_')\n")
             f.write("    \n")
             f.write("    if nargin < 1\n")
-            f.write("        error('必须提供models参数');\n")
+            f.write("        error('The models parameter is required');\n")
             f.write("    end\n")
             f.write("    if nargin < 2\n")
-            f.write("        pattern = ''; % 默认不筛选\n")
+            f.write("        pattern = ''; % Default no filtering\n")
             f.write("    end\n")
             f.write("    \n")
-            f.write("    figure('Name', ['不同样本大小下的性能对比 - ' pattern], 'Position', [100, 100, 1200, 600]);\n")
+            f.write("    figure('Name', ['Performance Comparison Across Different Sample Sizes - ' pattern], 'Position', [100, 100, 1200, 600]);\n")
             f.write("    hold on;\n")
             f.write("    \n")
             f.write("    model_names = fieldnames(models);\n")
             f.write("    matching_models = {};\n")
             f.write("    \n")
-            f.write("    % 筛选匹配的模型\n")
+            f.write("    % Filter matching models\n")
             f.write("    for i = 1:length(model_names)\n")
             f.write("        if isempty(pattern) || contains(model_names{i}, pattern)\n")
             f.write("            matching_models{end+1} = model_names{i};\n")
@@ -822,7 +847,7 @@ class MultiModelBCP(Callback):
             f.write("    end\n")
             f.write("    \n")
             f.write("    legends = {};\n")
-            f.write("    % 绘制匹配的模型\n")
+            f.write("    % Plot matching models\n")
             f.write("    for i = 1:length(matching_models)\n")
             f.write("        try\n")
             f.write("            model = models.(matching_models{i});\n")
@@ -836,35 +861,35 @@ class MultiModelBCP(Callback):
             f.write("                legends{end+1} = strrep(matching_models{i}, '_', '\\_');\n")
             f.write("            end\n")
             f.write("        catch e\n")
-            f.write("            fprintf('处理模型 %s 时出错: %s\\n', matching_models{i}, e.message);\n")
+            f.write("            fprintf('Error processing model %s: %s\\n', matching_models{i}, e.message);\n")
             f.write("        end\n")
             f.write("    end\n")
             f.write("    \n")
             f.write("    if ~isempty(legends)\n")
-            f.write("        xlabel('更新次数');\n")
-            f.write("        ylabel('验证误差率');\n")
-            f.write("        title(['不同样本大小下' pattern '模型的性能对比']);\n")
+            f.write("        xlabel('Update Count');\n")
+            f.write("        ylabel('Validation Error Rate');\n")
+            f.write("        title(['Performance Comparison of ' pattern ' Models Across Different Sample Sizes']);\n")
             f.write("        grid on;\n")
             f.write("        legend(legends, 'Location', 'best');\n")
             f.write("        set(gca, 'YScale', 'log');\n")
             f.write("    else\n")
-            f.write("        title('没有找到匹配的模型数据');\n")
+            f.write("        title('No matching model data found');\n")
             f.write("    end\n")
             f.write("    hold off;\n")
             f.write("end\n\n")
             
-            f.write("% 函数：分析模型收敛速度\n")
+            f.write("% Function: Analyze model convergence speed\n")
             f.write("function analyze_convergence(models, threshold)\n")
-            f.write("    % 此函数分析不同模型达到特定性能阈值所需的更新次数\n")
-            f.write("    % 参数:\n")
-            f.write("    %   models - 包含模型数据的结构\n")
-            f.write("    %   threshold - 性能阈值 (例如, 0.02 表示2%的误差率)\n")
+            f.write("    % This function analyzes how many updates different models need to reach a specific performance threshold\n")
+            f.write("    % Parameters:\n")
+            f.write("    %   models - Structure containing model data\n")
+            f.write("    %   threshold - Performance threshold (e.g., 0.02 for 2% error rate)\n")
             f.write("    \n")
             f.write("    if nargin < 1\n")
-            f.write("        error('必须提供models参数');\n")
+            f.write("        error('The models parameter is required');\n")
             f.write("    end\n")
             f.write("    if nargin < 2\n")
-            f.write("        threshold = 0.02; % 默认阈值\n")
+            f.write("        threshold = 0.02; % Default threshold\n")
             f.write("    end\n")
             f.write("    \n")
             f.write("    model_names = fieldnames(models);\n")
@@ -876,16 +901,16 @@ class MultiModelBCP(Callback):
             f.write("        try\n")
             f.write("            model = models.(model_names{i});\n")
             f.write("            if isfield(model, 'validation')\n")
-            f.write("                % 找到首次低于阈值的更新次数\n")
+            f.write("                % Find the first update count where error rate is below threshold\n")
             f.write("                idx = find(model.validation.val_bit_err <= threshold, 1, 'first');\n")
             f.write("                if ~isempty(idx)\n")
             f.write("                    convergence_updates(i) = model.validation.update_count(idx);\n")
             f.write("                    valid_models(i) = true;\n")
             f.write("                else\n")
-            f.write("                    convergence_updates(i) = NaN; % 未收敛\n")
+            f.write("                    convergence_updates(i) = NaN; % Not converged\n")
             f.write("                end\n")
             f.write("                \n")
-            f.write("                % 记录最终性能\n")
+            f.write("                % Record final performance\n")
             f.write("                final_errors(i) = model.validation.val_bit_err(end);\n")
             f.write("                valid_models(i) = true;\n")
             f.write("            elseif isfield(model, 'metrics_by_updates') && isfield(model.metrics_by_updates, 'val_bit_err')\n")
@@ -897,7 +922,7 @@ class MultiModelBCP(Callback):
             f.write("                    convergence_updates(i) = update_counts(idx);\n")
             f.write("                    valid_models(i) = true;\n")
             f.write("                else\n")
-            f.write("                    convergence_updates(i) = NaN; % 未收敛\n")
+            f.write("                    convergence_updates(i) = NaN; % Not converged\n")
             f.write("                end\n")
             f.write("                \n")
             f.write("                final_errors(i) = error_values(end);\n")
@@ -907,16 +932,16 @@ class MultiModelBCP(Callback):
             f.write("                final_errors(i) = NaN;\n")
             f.write("            end\n")
             f.write("        catch e\n")
-            f.write("            fprintf('处理模型 %s 时出错: %s\\n', model_names{i}, e.message);\n")
+            f.write("            fprintf('Error processing model %s: %s\\n', model_names{i}, e.message);\n")
             f.write("            convergence_updates(i) = NaN;\n")
             f.write("            final_errors(i) = NaN;\n")
             f.write("        end\n")
             f.write("    end\n")
             f.write("    \n")
-            f.write("    % 只保留有效模型的数据\n")
+            f.write("    % Only keep valid model data\n")
             f.write("    valid_idx = find(valid_models);\n")
             f.write("    if isempty(valid_idx)\n")
-            f.write("        fprintf('没有找到有效的模型数据进行收敛分析\\n');\n")
+            f.write("        fprintf('No valid model data found for convergence analysis\\n');\n")
             f.write("        return;\n")
             f.write("    end\n")
             f.write("    \n")
@@ -924,7 +949,7 @@ class MultiModelBCP(Callback):
             f.write("    convergence_updates = convergence_updates(valid_idx);\n")
             f.write("    final_errors = final_errors(valid_idx);\n")
             f.write("    \n")
-            f.write("    % 创建结果表格\n")
+            f.write("    % Create results table\n")
             f.write("    results_cell = cell(length(model_names) + 1, 3);\n")
             f.write("    results_cell(1,:) = {'Model', 'Updates_to_Threshold', 'Final_Error'};\n")
             f.write("    \n")
@@ -938,58 +963,108 @@ class MultiModelBCP(Callback):
             f.write("        results_cell{i+1, 3} = final_errors(i);\n")
             f.write("    end\n")
             f.write("    \n")
-            f.write("    % 显示结果\n")
-            f.write("    fprintf('收敛分析结果 (阈值: %.4f):\\n', threshold);\n")
+            f.write("    % Display results\n")
+            f.write("    fprintf('Convergence Analysis Results (Threshold: %.4f):\\n', threshold);\n")
             f.write("    disp(results_cell);\n")
             f.write("    \n")
-            f.write("    % 绘制收敛更新次数的条形图\n")
-            f.write("    figure('Name', '收敛速度对比', 'Position', [100, 100, 1200, 600]);\n")
+            f.write("    % Plot convergence updates bar chart\n")
+            f.write("    figure('Name', 'Convergence Speed Comparison', 'Position', [100, 100, 1200, 600]);\n")
             f.write("    \n")
-            f.write("    % 找出有效的收敛数据\n")
+            f.write("    % Find valid convergence data\n")
             f.write("    conv_idx = ~isnan(convergence_updates);\n")
             f.write("    if sum(conv_idx) > 0\n")
             f.write("        bar(convergence_updates(conv_idx));\n")
             f.write("        set(gca, 'XTick', 1:sum(conv_idx), 'XTickLabel', model_names(conv_idx), 'XTickLabelRotation', 45);\n")
-            f.write("        ylabel(['达到 ' num2str(threshold) ' 阈值所需的更新次数']);\n")
-            f.write("        title(['不同模型达到 ' num2str(threshold) ' 误差率的收敛速度']);\n")
+            f.write("        ylabel(['Updates needed to reach threshold ' num2str(threshold)]);\n")
+            f.write("        title(['Convergence Speed of Different Models to ' num2str(threshold) ' Error Rate']);\n")
             f.write("        grid on;\n")
             f.write("    else\n")
-            f.write("        text(0.5, 0.5, '没有模型达到收敛阈值', 'HorizontalAlignment', 'center', 'Units', 'normalized');\n")
+            f.write("        text(0.5, 0.5, 'No models reached the convergence threshold', 'HorizontalAlignment', 'center', 'Units', 'normalized');\n")
             f.write("    end\n")
             f.write("    \n")
-            f.write("    % 绘制最终误差率\n")
-            f.write("    figure('Name', '最终误差率对比', 'Position', [100, 100, 1200, 600]);\n")
+            f.write("    % Plot final error rates\n")
+            f.write("    figure('Name', 'Final Error Rate Comparison', 'Position', [100, 100, 1200, 600]);\n")
             f.write("    bar(final_errors);\n")
             f.write("    set(gca, 'XTick', 1:length(model_names), 'XTickLabel', model_names, 'XTickLabelRotation', 45);\n")
-            f.write("    ylabel('最终误差率');\n")
-            f.write("    title('不同模型的最终误差率对比');\n")
+            f.write("    ylabel('Final Error Rate');\n")
+            f.write("    title('Comparison of Final Error Rates Across Different Models');\n")
             f.write("    grid on;\n")
             f.write("end\n")
                 
-        print(f"MATLAB分析脚本已生成到: {script_path}")
+        print(f"MATLAB analysis script generated at: {script_path}")
         return script_path
 
 class signal_simulator():
+    """
+    A simulator for generating and processing OFDM signals across different channel models.
+    
+    This class provides methods for generating random bits, performing OFDM modulation,
+    simulating signal transmission through various channel models (AWGN, Rayleigh, Rician, WINNER II),
+    and processing the received signals for machine learning applications.
+    
+    Attributes:
+        all_carriers: Array of all available subcarrier indices
+        pilot_carriers: Array of indices designated for pilot carriers
+        data_carriers: Array of indices designated for data carriers
+        payloadBits_per_OFDM: Number of payload bits per OFDM symbol
+        channel_WINNER_loaded: Boolean flag indicating if WINNER II channel data is loaded
+        SNRdB: Signal-to-noise ratio in dB
+    """
+
     def __init__(self, SNR=10):
+        """
+        Initialize the signal simulator with default parameters.
+        
+        Args:
+            SNR: Signal-to-noise ratio in dB (default: 10)
+        """
         self.all_carriers = np.arange(K)
         self.pilot_carriers = self.all_carriers[::K // P]
         self.data_carriers = np.delete(self.all_carriers, self.pilot_carriers)
         self.payloadBits_per_OFDM = len(self.data_carriers) * mu
-        self.channel_3gpp_loaded = False
+        self.channel_WINNER_loaded = False
         self.SNRdB = SNR
     
     def lazy_load_channel(self):
-        """延迟加载通道数据"""
-        if not self.channel_3gpp_loaded:
-            self.channel_3gpp = np.load('channel_train.npy')
-            self.channel_3gpp_loaded = True
-
-    
+        """
+        Load WINNER channel data only when needed to save memory.
+        
+        This method loads the channel data from a file only when it's first requested,
+        improving memory efficiency for simulations that don't use the WINNER channel.
+        """
+        if not self.channel_WINNER_loaded:
+            self.channel_WINNER = np.load('channel_train.npy')
+            self.channel_WINNER_loaded = True
 
     def generate_bits(self, num_samples):
+        """
+        Generate random binary data for simulation.
+        
+        Args:
+            num_samples: Number of OFDM symbols to generate data for
+            
+        Returns:
+            Array of randomly generated bits with shape (num_samples, payloadBits_per_OFDM)
+        """
         return np.random.binomial(n=1, p=0.5, size=(num_samples, self.payloadBits_per_OFDM))
     
     def transmit_signals(self, bits):
+        """
+        Convert binary data to OFDM signals ready for transmission.
+        
+        Performs the full OFDM modulation process:
+        1. Serial-to-parallel conversion
+        2. QAM mapping
+        3. OFDM symbol generation
+        4. IDFT
+        5. Cyclic prefix addition
+        
+        Args:
+            bits: Binary data to be transmitted
+            
+        Returns:
+            OFDM symbols with cyclic prefix ready for transmission
+        """
         bits_sp = self.sp(bits)
         qam = self.mapping(bits_sp)
         ofdm_data = self.ofdm_symbol(qam)
@@ -998,6 +1073,24 @@ class signal_simulator():
         return ofdm_with_cp
     
     def received_signals(self, transmit_signals, channel_type):
+        """
+        Process signals through specified channel model and add appropriate noise.
+        
+        Simulates signal propagation through different channel types:
+        - Rayleigh fading channel
+        - Rician fading channel
+        - AWGN channel
+        - WINNER II channel
+        - Mixed channel types
+        
+        Args:
+            transmit_signals: OFDM signals to transmit
+            channel_type: Type of channel to simulate ("rayleigh", "rician", "awgn", "WINNER II",
+                        "random_mixed", or "sequential_mixed")
+            
+        Returns:
+            Signals after passing through the specified channel and noise addition
+        """
         self.channel_type = channel_type
         if self.channel_type == "rayleigh":
             channel = np.sqrt(1 / 2) * np.sqrt(1/num_path) * (np.random.randn(1, num_path) + 1j * np.random.randn(1, num_path))
@@ -1010,11 +1103,11 @@ class signal_simulator():
             channel = channel[:, 0]
         elif self.channel_type == "awgn":
             return self.awgn(transmit_signals, self.SNRdB)
-        elif self.channel_type == "3gpp":
+        elif self.channel_type == "WINNER":
             self.lazy_load_channel()
-            train_size = self.channel_3gpp.shape[0]
+            train_size = self.channel_WINNER.shape[0]
             index = np.random.choice(np.arange(train_size), size=1)
-            h = self.channel_3gpp[index]
+            h = self.channel_WINNER[index]
             channel = h[:, 0]
         elif self.channel_type == "random_mixed" or self.channel_type == "sequential_mixed":
             return transmit_signals  
@@ -1028,6 +1121,22 @@ class signal_simulator():
         return convolved + noise
     
     def ofdm_simulate(self, bits, channel_type):
+        """
+        Perform end-to-end OFDM simulation for a single set of bits.
+        
+        Simulates the entire OFDM transmission and reception process:
+        1. Transmit signal generation
+        2. Channel propagation
+        3. Cyclic prefix removal
+        4. DFT demodulation
+        
+        Args:
+            bits: Binary data to transmit
+            channel_type: Type of channel to simulate
+            
+        Returns:
+            Concatenated real and imaginary parts of the demodulated signal
+        """
         ofdm_tx = self.transmit_signals(bits)
         ofdm_rx = self.received_signals(ofdm_tx, channel_type)
         ofdm_rx_no_cp = self.remove_cp(ofdm_rx)
@@ -1035,6 +1144,18 @@ class signal_simulator():
         return np.concatenate((np.real(ofdm_demodulation), np.imag(ofdm_demodulation)))
     
     def generate_mixed_dataset(self, channel_types, bits_array, mode="mixed_random"):
+        """
+        Generate a dataset with samples from multiple channel types.
+        
+        Args:
+            channel_types: List of channel types to use
+            bits_array: Binary data for transmission
+            mode: Dataset mixing mode ("mixed_random" shuffles the samples,
+                 "sequential_mixed" keeps them grouped by channel type)
+            
+        Returns:
+            Tuple containing the mixed samples and their corresponding bits
+        """
         num_types = len(channel_types)
         samples_per_type = len(bits_array) // num_types
         mixed_samples = []
@@ -1056,6 +1177,17 @@ class signal_simulator():
         return np.asarray(mixed_samples), np.asarray(mixed_bits)
 
     def generate_training_dataset(self, channel_type, bits_array, mode="sequential_mixed"):
+        """
+        Generate a training dataset for a specified channel type or mix of channels.
+        
+        Args:
+            channel_type: Channel type or list of channel types
+            bits_array: Binary data for transmission
+            mode: Dataset mixing mode when multiple channels are used
+            
+        Returns:
+            Tuple containing the training samples and their corresponding bits
+        """
         if isinstance(channel_type, list) or channel_type in ["random_mixed", "sequential_mixed"]:
             if channel_type in ["random_mixed", "sequential_mixed"]:
                 channel_types = ["rician", "awgn", "rayleigh"] 
@@ -1070,6 +1202,17 @@ class signal_simulator():
         return np.asarray(training_sample), bits_array
     
     def generate_testing_dataset(self, channel_type, num_samples, mode="sequential_mixed"):
+        """
+        Generate a testing dataset for a specified channel type or mix of channels.
+        
+        Args:
+            channel_type: Channel type or list of channel types
+            num_samples: Number of samples to generate
+            mode: Dataset mixing mode when multiple channels are used
+            
+        Returns:
+            Tuple containing the testing samples and their corresponding bits
+        """
         bits_array = self.generate_bits(num_samples)
         if isinstance(channel_type, list) or channel_type in ["random_mixed", "sequential_mixed"]:
             if channel_type in ["random_mixed", "sequential_mixed"]:
@@ -1085,31 +1228,104 @@ class signal_simulator():
         return np.asarray(testing_sample), bits_array
     
     def sp(self, bits):
+        """
+        Serial-to-parallel conversion of bits.
+        
+        Args:
+            bits: Serial bit stream
+            
+        Returns:
+            Bits arranged for QAM mapping
+        """
         return bits.reshape((len(self.data_carriers), mu))
     
     def mapping(self, bits_sp):
+        """
+        Map bits to QAM symbols according to the mapping table.
+        
+        Args:
+            bits_sp: Bits after serial-to-parallel conversion
+            
+        Returns:
+            Array of QAM symbols
+        """
         return np.array([mapping_table[tuple(b)] for b in bits_sp])
     
     def ofdm_symbol(self, qam_payload):
+        """
+        Create OFDM symbol with data and pilot carriers.
+        
+        Args:
+            qam_payload: QAM-mapped data
+            
+        Returns:
+            OFDM symbol with pilot carriers inserted
+        """
         symbol = np.zeros(K, dtype=complex)
         symbol[self.pilot_carriers] = pilot_value
         symbol[self.data_carriers] = qam_payload
         return symbol
     
     def idft(self, OFDM_data):
+        """
+        Perform Inverse Discrete Fourier Transform (IDFT) on OFDM data.
+        
+        Args:
+            OFDM_data: Frequency-domain OFDM symbol
+            
+        Returns:
+            Time-domain OFDM symbol
+        """
         return np.fft.ifft(OFDM_data)
     
     def add_cp(self, OFDM_time):
+        """
+        Add cyclic prefix to OFDM time-domain symbol.
+        
+        Args:
+            OFDM_time: Time-domain OFDM symbol
+            
+        Returns:
+            OFDM symbol with cyclic prefix added
+        """
         cp = OFDM_time[-CP:]
         return np.hstack([cp, OFDM_time])
     
     def remove_cp(self, signals):
+        """
+        Remove cyclic prefix from received OFDM symbol.
+        
+        Args:
+            signals: Received signal with cyclic prefix
+            
+        Returns:
+            Signal with cyclic prefix removed
+        """
         return signals[CP:(CP+K)]
     
     def dft(self, signals):
+        """
+        Perform Discrete Fourier Transform (DFT) on received time-domain signals.
+        
+        Args:
+            signals: Time-domain signals after CP removal
+            
+        Returns:
+            Frequency-domain OFDM symbol
+        """
         return np.fft.fft(signals)
     
     def awgn(self, signals, SNRdb):
+        """
+        Add Additive White Gaussian Noise (AWGN) to signals.
+        
+        Args:
+            signals: Input signals
+            SNRdb: Signal-to-noise ratio in dB
+            
+        Returns:
+            Signals with AWGN added
+        """
         gamma = 10**(SNRdb/10)
         P = sum(abs(signals) ** 2) / len(signals) if signals.ndim == 1 else sum(sum(abs(signals) ** 2)) / len(signals)
         N0 = P / gamma
@@ -1117,9 +1333,27 @@ class signal_simulator():
         return signals + n
 
 def create_tf_dataset(x_data, y_data, batch_size, buffer_size=10000, repeat=True, prefetch=True):
-    """创建高效的TensorFlow数据集，减少内存压力"""
+    """
+    Create a TensorFlow dataset optimized for training neural networks.
+    
+    This function takes input features and target labels and creates a TensorFlow dataset
+    with performance optimizations like shuffling, batching, and prefetching. The dataset
+    is configured for efficient training loops with options to repeat indefinitely and
+    prefetch data for optimal GPU utilization.
+    
+    Args:
+        x_data: Input features array
+        y_data: Target labels array
+        batch_size: Number of samples per batch
+        buffer_size: Size of the shuffle buffer (default: 10000)
+        repeat: Whether to repeat the dataset indefinitely (default: True)
+        prefetch: Whether to enable prefetching for performance (default: True)
+        
+    Returns:
+        A TensorFlow dataset configured with the specified optimizations
+    """
+    
     dataset = tf.data.Dataset.from_tensor_slices((x_data, y_data))
-    # 打乱数据以避免训练中的偏差
     dataset = dataset.shuffle(buffer_size=min(buffer_size, len(x_data)))
     dataset = dataset.batch(batch_size)
     if repeat:
@@ -1129,6 +1363,23 @@ def create_tf_dataset(x_data, y_data, batch_size, buffer_size=10000, repeat=True
     return dataset
 
 def bit_err(y_true, y_pred):
+    """
+    Calculate the bit error rate between predicted and true binary values.
+    
+    This function computes the bit error rate (BER) between the predicted outputs
+    and ground truth values. It thresholds both predictions and ground truth at 0.5,
+    compares them element-wise, and returns the error rate as a proportion between 0 and 1.
+    
+    This is typically used as a custom metric for OFDM signal detection models where
+    the goal is to minimize bit errors in the recovered signal.
+    
+    Args:
+        y_true: Ground truth binary values
+        y_pred: Model predictions (continuous values between 0 and 1)
+        
+    Returns:
+        The bit error rate as a scalar between 0 and 1
+    """
     err = 1 - tf.reduce_mean(
         tf.reduce_mean(
             tf.cast(
@@ -1142,12 +1393,32 @@ def bit_err(y_true, y_pred):
     return err
 
 class base_models(Model):
+    """
+    Base neural network model for OFDM signal detection.
+    
+    This class serves as the foundation for specialized OFDM detection models,
+    defining a common architecture with fully-connected layers. It inherits from
+    Keras Model class and provides a default network structure that can be
+    extended by subclasses for specific detection algorithms.
+    
+    Attributes:
+        input_dim: Dimension of the input features
+        output_dim: Dimension of the output (number of bits per OFDM symbol)
+        model: Sequential model with the neural network architecture
+    """
     def __init__(self, input_dim, payloadBits_per_OFDM):
+        """
+        Initialize the base model with specified dimensions.
+        
+        Args:
+            input_dim: Dimension of the input features
+            payloadBits_per_OFDM: Number of payload bits per OFDM symbol, 
+                                 determines the output dimension
+        """
         super(base_models, self).__init__()
         self.input_dim = input_dim
         self.output_dim = payloadBits_per_OFDM
         
-        # 使用Sequential定义模型
         self.model = keras.Sequential([
             layers.Dense(256, activation='relu', input_shape=(input_dim,)),
             layers.Dense(512, activation='relu'),
@@ -1157,14 +1428,51 @@ class base_models(Model):
         ])
         
     def call(self, inputs, training=False):
+        """
+        Forward pass through the model.
+        
+        This method defines how inputs are processed through the network
+        during both training and inference.
+        
+        Args:
+            inputs: Input tensor to the model
+            training: Boolean indicating whether the model is in training mode
+            
+        Returns:
+            Output predictions from the model
+        """
         return self.model(inputs, training=training)
 
 class DNN(base_models):
+    """
+    Standard Deep Neural Network implementation for OFDM signal detection.
+    
+    This class extends the base_models class with specific compilation and training
+    functionality for conventional deep learning approaches to OFDM detection.
+    It uses Adam optimizer and mean squared error loss with bit error rate metric.
+    
+    The model is designed to detect transmitted bits from received OFDM signals
+    after passing through various channel conditions.
+    """
     def __init__(self, input_dim, payloadBits_per_OFDM):
+        """
+        Initialize the DNN model with specified dimensions and compile it.
+        
+        Args:
+            input_dim: Dimension of the input features
+            payloadBits_per_OFDM: Number of payload bits per OFDM symbol, 
+                                 determines the output dimension
+        """
         super(DNN, self).__init__(input_dim, payloadBits_per_OFDM)
         self.compile_model()
 
     def compile_model(self):
+        """
+        Compile the model with optimizer, loss function, and metrics.
+        
+        Sets up the model with Adam optimizer, mean squared error loss,
+        and bit error rate metric for training.
+        """
         self.compile(
             optimizer=tf.keras.optimizers.Adam(0.001),
             loss=tf.keras.losses.MeanSquaredError(), 
@@ -1173,6 +1481,24 @@ class DNN(base_models):
     
     def train(self, x_train, y_train, epochs=10, batch_size=32, 
               validation_data=None, callbacks=None, dataset_type="default"):
+        """
+        Train the model on provided data with performance tracking.
+        
+        This method trains the model while automatically adding a MultiModelBCP
+        callback to track performance metrics across training.
+        
+        Args:
+            x_train: Training input data
+            y_train: Training target data
+            epochs: Number of training epochs (default: 10)
+            batch_size: Batch size for training (default: 32)
+            validation_data: Optional tuple of validation data (x_val, y_val)
+            callbacks: Additional callbacks to use during training
+            dataset_type: Type of dataset used for tracking (default: "default")
+            
+        Returns:
+            Keras History object containing training metrics
+        """
         final_callbacks = [MultiModelBCP(model_name=f"DNN_{dataset_type}", dataset_type=dataset_type)]
         if callbacks:
             final_callbacks.extend(callbacks if isinstance(callbacks, list) else [callbacks])
@@ -1188,22 +1514,63 @@ class DNN(base_models):
         )
     
     def clone(self):
+        """
+        Create a deep copy of the current model.
+        
+        This method creates a new instance of the DNN class with the same
+        architecture and weights as the current model, allowing for
+        multiple experiments from the same starting point.
+        
+        Returns:
+            A new DNN model instance with copied weights
+        """
         new_model = DNN(self.input_dim, self.output_dim)
         new_model.model.set_weights(self.model.get_weights())
         return new_model
 
 class MetaDNN(base_models):
+    """
+    Meta-learning Deep Neural Network for adaptive OFDM signal detection.
+    
+    This class implements a meta-learning approach using Reptile algorithm
+    for OFDM signal detection. It adapts to new channel conditions with fewer samples
+    than traditional DNN approaches by learning an initialization that can be
+    quickly fine-tuned to specific channel conditions.
+    
+    The model supports early stopping, learning rate scheduling, and maintains
+    tracking of meta-learning performance across training iterations.
+    """
     def __init__(self, input_dim, payloadBits_per_OFDM, inner_lr=0.01, meta_lr=0.3, mini_size=32,
                  first_decay_steps=500, t_mul=1.1, m_mul=1, alpha=0.001,
                  early_stopping=True, patience=20, min_delta=0.0002, abs_threshold=0.011, 
                  progressive_patience=True, verbose=1):
+        """
+        Initialize the MetaDNN model with meta-learning parameters.
+        
+        Args:
+            input_dim: Dimension of the input features
+            payloadBits_per_OFDM: Number of payload bits per OFDM symbol
+            inner_lr: Learning rate for inner loop optimization (default: 0.01)
+            meta_lr: Learning rate for meta-optimization (default: 0.3)
+            mini_size: Batch size for inner loop updates (default: 32)
+            first_decay_steps: Steps for first decay cycle in LR scheduler (default: 500)
+            t_mul: Time multiplier for cosine decay restarts (default: 1.1)
+            m_mul: Multiplier for cosine decay restarts (default: 1)
+            alpha: Minimum learning rate factor (default: 0.001)
+            early_stopping: Whether to use early stopping (default: True)
+            patience: Number of updates to wait for improvement (default: 20)
+            min_delta: Minimum change to qualify as improvement (default: 0.0002)
+            abs_threshold: Absolute threshold for early stopping (default: 0.011)
+            progressive_patience: Whether to adjust patience based on performance (default: True)
+            verbose: Verbosity level of output (default: 1)
+        """
         super(MetaDNN, self).__init__(input_dim, payloadBits_per_OFDM)
         self.inner_lr = inner_lr
         self.meta_lr = meta_lr
         self.mini_batch_size = mini_size
         self.optimizer = tf.keras.optimizers.legacy.SGD(inner_lr)
         
-        self.sampling_rate = 10  # 每10次更新记录一次指标
+        self.sampling_rate = 10  
         self.all_epoch_losses = []
         self.all_val_bit_errs = []
         self.update_counts = []
@@ -1213,16 +1580,16 @@ class MetaDNN(base_models):
         self.best_weights = None
         self.best_val_err = float('inf')
         
-        # 改进的早停参数
+        # Early Stop config
         self.early_stopping = early_stopping
-        self.patience = patience            # 减少patience (从50减少到20)
-        self.min_delta = min_delta          # 增加min_delta (从0.00005增加到0.0002)
-        self.abs_threshold = abs_threshold  # 新增绝对阈值 (0.011)
-        self.progressive_patience = progressive_patience  # 动态调整patience
+        self.patience = patience            
+        self.min_delta = min_delta          
+        self.abs_threshold = abs_threshold 
+        self.progressive_patience = progressive_patience  
         self.verbose = verbose
         self.wait = 0  # Counter for patience
         self.stopped_epoch = 0  # The epoch at which training was stopped
-        self.no_improvement_count = 0  # 连续无改善的计数
+        self.no_improvement_count = 0  # Count for improvement
         
         self.meta_lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
             initial_learning_rate=meta_lr,
@@ -1233,12 +1600,30 @@ class MetaDNN(base_models):
         )
     
     def get_params(self):
+        """
+        Get the current model parameters (weights).
+        
+        Returns:
+            Current model weights
+        """
         return self.get_weights()
     
     def set_params(self, params):
+        """
+        Set the model parameters (weights).
+        
+        Args:
+            params: Weights to set for the model
+        """
         self.set_weights(params)
     
     def clone(self):
+        """
+        Create a deep copy of the current model.
+        
+        Returns:
+            A new MetaDNN model instance with the same parameters and weights
+        """
         model_copy = MetaDNN(
             self.input_dim, self.output_dim, 
             self.inner_lr, self.meta_lr, self.mini_batch_size,
@@ -1253,62 +1638,72 @@ class MetaDNN(base_models):
         return model_copy
     
     def _should_stop_early(self, val_err):
-        """优化后的早停策略，考虑绝对阈值和动态patience"""
+        """
+        Determine if early stopping should be triggered based on validation error.
+        
+        This method implements a sophisticated early stopping policy with:
+        1. Absolute threshold stopping
+        2. Progressive patience adjustment based on performance
+        3. Standard patience-based stopping
+        
+        Args:
+            val_err: Current validation error rate
+            
+        Returns:
+            Boolean indicating whether to stop training
+        """
         if not self.early_stopping:
             return False
         
-        # 1. 检查绝对阈值 - 如果误差已经足够低，可以直接停止
+        # 1. Check absolute threshold - stop if error is low enough
         if val_err <= self.abs_threshold:
             if self.verbose > 0:
                 print(f"\nEarly stopping: reached target performance threshold {self.abs_threshold}")
-            self.best_val_err = val_err
-            self.best_weights = [tf.identity(w) for w in self.get_weights()]
             self.stopped_epoch = self.total_updates
             return True
             
-        # 2. 检查相对改善
-        if val_err < self.best_val_err - self.min_delta:
-            # 验证误差有显著改善
-            improvement = self.best_val_err - val_err
-            self.best_val_err = val_err
-            self.best_weights = [tf.identity(w) for w in self.get_weights()]
-            self.wait = 0
-            self.no_improvement_count = 0
+        # 2. Check if waited long enough without improvement
+        # Dynamically adjust patience based on performance
+        effective_patience = self.patience
+        if self.progressive_patience and self.best_val_err < 0.015:
+            # Performance is already good, reduce patience
+            reduction_factor = max(0.5, (self.best_val_err - 0.009) / 0.006)  # 0.015→1.0, 0.009→0.0
+            effective_patience = max(5, int(self.patience * reduction_factor))
             
-            # 对于接近最佳性能的情况，记录日志
-            if val_err < 0.015 and self.verbose > 0:
-                print(f"Validation error improved to {val_err:.6f} (improvement: {improvement:.6f})")
-        else:
-            # 验证误差没有显著改善
-            self.wait += 1
-            self.no_improvement_count += 1
-            
-            # 动态调整patience - 当性能接近最佳时提前停止
-            effective_patience = self.patience
-            if self.progressive_patience and self.best_val_err < 0.015:
-                # 性能已经不错，减少patience
-                reduction_factor = max(0.5, (self.best_val_err - 0.009) / 0.006)  # 0.015→1.0, 0.009→0.0
-                effective_patience = max(5, int(self.patience * reduction_factor))
-                
-                if self.verbose > 1 and self.wait % 5 == 0:
-                    print(f"Adjusted patience: {effective_patience} (base: {self.patience}, "
-                          f"current best: {self.best_val_err:.6f})")
-            
-            if self.wait >= effective_patience:
-                self.stopped_epoch = self.total_updates
-                if self.verbose > 0:
-                    print(f"\nEarly stopping triggered at update {self.total_updates}. "
-                          f"Best val_bit_err: {self.best_val_err:.6f}")
-                return True
+            if self.verbose > 1 and self.wait % 5 == 0:
+                print(f"Adjusted patience: {effective_patience} (base: {self.patience}, "
+                    f"current best: {self.best_val_err:.6f})")
+        
+        if self.wait >= effective_patience:
+            self.stopped_epoch = self.total_updates
+            if self.verbose > 0:
+                print(f"\nEarly stopping triggered at update {self.total_updates}. "
+                    f"Best val_bit_err: {self.best_val_err:.6f}")
+            return True
                 
         return False
 
     def inner_update(self, x_task, y_task, steps=None):
+        """
+        Perform inner loop updates on a specific task.
+        
+        This method implements the inner optimization loop of the Reptile algorithm,
+        updating model weights on a specific task (channel condition) and returning
+        the weight differences for meta-update.
+        
+        Args:
+            x_task: Input data for the task
+            y_task: Target data for the task
+            steps: Number of inner update steps (if None, derived from batch size)
+            
+        Returns:
+            Tuple containing weight differences, average loss, and number of steps used
+        """
         original_weights = [tf.identity(w) for w in self.get_weights()]
         losses = []
 
         num_samples = x_task.shape[0]
-        #inner_step selection
+        # Inner step selection
         if steps is None:
             steps = max(1, int(np.ceil(num_samples / self.mini_batch_size)))
         else:
@@ -1327,22 +1722,50 @@ class MetaDNN(base_models):
             grads = tape.gradient(loss, self.trainable_variables)
             self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
         
-        # 获取更新后的权重
+        # Get updated weights
         updated_weights = self.get_weights()
         
-        # 计算权重差异
+        # Calculate weight differences
         weight_diffs = [updated - original for updated, original in zip(updated_weights, original_weights)]
         
-        # 恢复原始权重
+        # Restore original weights
         self.set_weights(original_weights)
         
         return weight_diffs, tf.reduce_mean(losses), steps
     
     def evaluate(self, x_val, y_val):
+        """
+        Evaluate model performance on validation data.
+        
+        Args:
+            x_val: Validation input data
+            y_val: Validation target data
+            
+        Returns:
+            Bit error rate on the validation data
+        """
         preds = self(x_val, training=False)
         return bit_err(y_val, preds).numpy()
     
     def train_reptile(self, tasks, meta_epochs=10, task_steps=None, meta_validation_data=None):
+        """
+        Train the model using the Reptile meta-learning algorithm.
+        
+        This method implements the full Reptile meta-learning training procedure:
+        1. Inner loop updates on sampled tasks
+        2. Meta-update by moving toward task-specific optima
+        3. Learning rate scheduling with warmup
+        4. Early stopping based on validation performance
+        
+        Args:
+            tasks: List of (x, y) tuples representing different tasks (channel conditions)
+            meta_epochs: Maximum number of meta-update iterations (default: 10)
+            task_steps: Number of gradient steps per task (default: None, auto-determined)
+            meta_validation_data: Optional tuple of (x_val, y_val) for validation
+            
+        Returns:
+            Tuple of (losses, validation errors, update counts) for performance tracking
+        """
         start_time = time.time()
         epoch_times = []
         meta_grads = None
@@ -1355,7 +1778,7 @@ class MetaDNN(base_models):
         self.stopped_epoch = 0
         self.no_improvement_count = 0
         
-        # 记录初始性能
+        # Record initial performance
         if meta_validation_data is not None:
             initial_val_err = self.evaluate(*meta_validation_data)
             if self.verbose > 0:
@@ -1390,7 +1813,7 @@ class MetaDNN(base_models):
                 for i, diff in enumerate(weight_diffs):
                     meta_grads[i] += diff
             
-            # 应用元更新
+            # Apply meta-update
             current_weights = self.get_weights()
             new_weights = []
             
@@ -1399,7 +1822,7 @@ class MetaDNN(base_models):
             
             self.set_weights(new_weights)
             
-            # 更新计数
+            # Update counters
             self.total_updates += 1
             self.inner_updates += epoch_inner_updates
             
@@ -1413,34 +1836,43 @@ class MetaDNN(base_models):
                 if meta_validation_data is not None:
                     val_bit_err = self.evaluate(*meta_validation_data)
                     self.all_val_bit_errs.append(val_bit_err)
-                
-                    # 检查早停
+                    
+                    if val_bit_err < self.best_val_err - self.min_delta:
+                        # Validation error improved significantly
+                        improvement = self.best_val_err - val_bit_err
+                        self.best_val_err = val_bit_err
+                        self.best_weights = [tf.identity(w) for w in self.get_weights()]
+                        self.wait = 0
+                        self.no_improvement_count = 0
+                        
+                        # Log for near-optimal performance
+                        if val_bit_err < 0.015 and self.verbose > 0:
+                            print(f"Validation error improved to {val_bit_err:.6f} (improvement: {improvement:.6f})")
+                    else:
+                        # Validation error did not improve significantly
+                        self.wait += 1
+                        self.no_improvement_count += 1
+                    
+                    # Check early stopping
                     if self._should_stop_early(val_bit_err):
                         break
-                    
-                    # 额外的快速收敛检测 - 如果已经连续20次迭代几乎没有改善，且已经达到良好性能
-                    if self.no_improvement_count > 20 and self.best_val_err < 0.013:
-                        if self.verbose > 0:
-                            print(f"\nStopping: no significant improvement for 20 iterations. "
-                                  f"Best val_bit_err: {self.best_val_err:.6f}")
-                        break
 
-            if epoch % 100 == 0:
+            if epoch % 50 == 0:
                 import gc
                 gc.collect()
             
-            # epoch time
+            # Epoch time
             epoch_time = time.time() - epoch_start_time
             epoch_times.append(epoch_time)
             
-            # print progress
+            # Print progress
             if (epoch + 1) % 50 == 0 or (val_bit_err is not None and val_bit_err < 0.015 and (epoch + 1) % 20 == 0):
                 avg_time = np.mean(epoch_times[-min(50, len(epoch_times)):])
                 print(f"Meta Epoch {epoch + 1}/{meta_epochs}, "
-                      f"loss: {epoch_loss.numpy():.6f}, "
-                      f"val_bit_err: {val_bit_err:.6f}, "
-                      f"LR: {current_meta_lr:.6f}, "
-                      f"Avg Time: {avg_time:.4f}s")
+                    f"loss: {epoch_loss.numpy():.6f}, "
+                    f"val_bit_err: {val_bit_err:.6f}, "
+                    f"LR: {current_meta_lr:.6f}, "
+                    f"Avg Time: {avg_time:.4f}s")
         
         # Restore best model weights
         if self.best_weights is not None:
@@ -1456,7 +1888,20 @@ class MetaDNN(base_models):
         return self.all_epoch_losses, self.all_val_bit_errs, self.update_counts
         
     def fine_tune(self, x_train, y_train, steps=1):
-        """在 3GPP 数据上微调"""
+        """
+        Fine-tune the model on new data with a few gradient steps.
+        
+        This method performs quick adaptation of the meta-learned model
+        to new channel conditions (typically WINNER II data) with minimal steps.
+        
+        Args:
+            x_train: Input data for fine-tuning
+            y_train: Target data for fine-tuning
+            steps: Number of fine-tuning steps (default: 1)
+            
+        Returns:
+            Bit error rate after fine-tuning
+        """
         for _ in range(steps):
             with tf.GradientTape() as tape:
                 preds = self(x_train, training=True)
@@ -1466,103 +1911,98 @@ class MetaDNN(base_models):
         return self.evaluate(x_train, y_train)
 
 if __name__ == "__main__":
-    import gc
-    import os
-    import numpy as np
-    import tensorflow as tf
-    import time
-    from datetime import datetime
-    import sys
-    
-    # 导入配置系统
-    from ExperimentConfig import ExperimentConfig, apply_config_to_simulator, create_meta_dnn_from_config
-    
-    # 创建完全集成的实验配置
-    config = ExperimentConfig()
-    
-    # 可以在这里修改配置参数 (示例)
-    # config.config["global"]["K"] = 128  # 更改子载波数量
-    config.config["dataset"]["train_samples"] = 1280
-    # config.config["meta_dnn"]["abs_threshold"] = 0.01
-    
-    # 保存配置以记录实验设置
-    experiment_time = datetime.now().strftime('%Y%m%d_%H%M%S')
-    config_path = config.save_as_python(filepath=f"experiment_configs/ofdm_experiment_{experiment_time}.py")
-    print(f"本次实验配置已保存到: {config_path}")
-    
-    # 导出为全局参数文件以兼容性，仅供参考
-    global_params_path = config.export_to_global_parameters(
-        output_file=f"experiment_configs/global_parameters_{experiment_time}.py"
-    )
-    
-    # 注入全局参数到全局命名空间，替代导入global_parameters模块
-    config.inject_globals(globals())
-    
-    # 设置随机种子以便复现
-    seed = config.config["seed"]
-    np.random.seed(seed)
-    tf.random.set_seed(seed)
-    
-    # 启用GPU内存增长
-    if config.config["gpu_memory_growth"]:
-        gpus = tf.config.list_physical_devices('GPU')
-        if gpus:
+   
+    # Configure GPU memory growth to prevent TensorFlow from allocating all GPU memory at once
+    gpus = tf.config.list_physical_devices('GPU')
+    print("Available GPU devices:", tf.config.list_physical_devices('GPU'))
+    if gpus:
             try:
                 for gpu in gpus:
                     tf.config.experimental.set_memory_growth(gpu, True)
             except RuntimeError as e:
-                print(f"GPU设置错误: {e}")
+                print(f"GPU setup error: {e}")
+
+    # Import the experiment configuration system
+    from ExperimentConfig import ExperimentConfig, apply_config_to_simulator, create_meta_dnn_from_config
     
-    # 获取数据集和训练参数
+    # Create a fully integrated experiment configuration
+    config = ExperimentConfig()
+    
+    # Modify configuration parameters if needed (examples)
+    # config.config["global"]["K"] = 128  # Change number of subcarriers
+    config.config["dataset"]["train_samples"] = 64000
+    config.config["meta_dnn"]["early_stopping"]=False
+    # config.config["meta_dnn"]["abs_threshold"] = 0.01
+    
+    # Save configuration to record experiment settings
+    experiment_time = datetime.now().strftime('%Y%m%d_%H%M%S')
+    config_path = config.save_as_python(filepath=f"experiment_configs/ofdm_experiment_{experiment_time}.py")
+    print(f"Experiment configuration saved to: {config_path}")
+    
+    # Export as global parameters file for compatibility (reference only)
+    global_params_path = config.export_to_global_parameters(
+        output_file=f"experiment_configs/global_parameters_{experiment_time}.py"
+    )
+    
+    # Inject global parameters into global namespace (replaces importing global_parameters module)
+    config.inject_globals(globals())
+    
+    # Set random seed for reproducibility
+    seed = config.config["seed"]
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+    
+    
+    # Get dataset and training parameters from configuration
     dataset_params = config.get_dataset_params()
     dnn_params = config.get_dnn_params()
     output_params = config.get_output_params()
     
-    # 设置数据参数
+    # Set data parameters
     DNN_samples = dataset_params["train_samples"]
     DNN_epoch = dnn_params["epochs"]
     DNN_batch_size = dnn_params["batch_size"]
     channel_types = dataset_params["channel_types"]
     meta_channel_types = dataset_params["meta_channel_types"]
     
-    # 确保输出目录存在
+    # Ensure output directory exists
     log_dir = output_params.get("log_dir", "experiment_logs")
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
     
-    # 创建信号模拟器实例
+    # Create signal simulator instance
     simulator = signal_simulator()
-    # 全部参数已通过全局变量注入，只需应用SNR
+    # All parameters already injected through global variables, just apply SNR
     simulator.SNRdB = config.config["signal"]["SNR"]
     
-    # 初始化模型和历史记录容器
+    # Initialize model and history containers
     models = {}
     histories = {}
     
-    # 生成训练数据
-    print(f"生成 {DNN_samples} 个训练样本...")
+    # Generate training data
+    print(f"Generating {DNN_samples} training samples...")
     bits = simulator.generate_bits(DNN_samples)
     MultiModelBCP.clear_data()
     
-    # 训练阶段 - 标准DNN
+    # Training Phase - Standard DNN
     print("=== Train Phase ===")
     for channel in channel_types:
-        print(f"\n训练于 {channel} 通道...")
+        print(f"\nTraining on {channel} channel...")
         
-        # 生成训练数据
+        # Generate training data
         start_time = time.time()
         x_train, y_train = simulator.generate_training_dataset(channel, bits)
         x_test, y_test = simulator.generate_testing_dataset(channel, dataset_params["test_samples"] // 5)
-        print(f"数据生成耗时: {time.time() - start_time:.2f}秒")
+        print(f"Data generation time: {time.time() - start_time:.2f} seconds")
         
-        # 创建模型
+        # Create model
         model_name = f"DNN_{channel}"
         models[model_name] = DNN(
             input_dim=x_train.shape[1],
             payloadBits_per_OFDM=simulator.payloadBits_per_OFDM
         )
         
-        # 转换为TensorFlow数据集
+        # Convert to TensorFlow dataset
         train_dataset = create_tf_dataset(
             x_train, y_train, 
             batch_size=DNN_batch_size,
@@ -1570,7 +2010,7 @@ if __name__ == "__main__":
             buffer_size=min(5000, len(x_train))
         )
         
-        # 使用内存高效回调
+        # Use memory-efficient callback
         callback = MultiModelBCP(
             model_name=model_name, 
             dataset_type=channel,
@@ -1578,7 +2018,7 @@ if __name__ == "__main__":
             max_points=output_params.get("max_points", 1000)
         )
         
-        # 训练模型
+        # Train model
         start_time = time.time()
         histories[model_name] = models[model_name].fit(
             train_dataset,
@@ -1587,47 +2027,47 @@ if __name__ == "__main__":
             callbacks=[callback],
             verbose=1
         )
-        print(f"模型训练耗时: {time.time() - start_time:.2f}秒")
+        print(f"Model training time: {time.time() - start_time:.2f} seconds")
         
-        # 手动释放内存
+        # Free memory manually
         del x_train, y_train, train_dataset
         gc.collect()
     
-    # 元学习阶段
-    print("\n=== 元学习阶段 ===")
+    # Meta-learning Phase
+    print("\n=== Meta-learning Phase ===")
     meta_tasks = []
     meta_model_name = "Meta_DNN"
 
-    # 计算元更新次数，与DNN保持一致
+    # Calculate meta-update iterations, matching DNN
     total_meta_iteration = int((DNN_samples/DNN_batch_size)*DNN_epoch)
-    print(f"元更新次数: {total_meta_iteration}")
+    print(f"Meta-update iterations: {total_meta_iteration}")
     
-    # 为每种通道生成元学习任务
-    print("生成元学习任务...")
+    # Generate meta-learning tasks for each channel type
+    print("Generating meta-learning tasks...")
     start_time = time.time()
     for channel in meta_channel_types:
         channel_bits = simulator.generate_bits(DNN_samples)
         x_task, y_task = simulator.generate_training_dataset(channel, channel_bits)
         meta_tasks.append((x_task, y_task))
-        # 立即释放内存
+        # Free memory immediately
         gc.collect()
-    print(f"元学习任务生成耗时: {time.time() - start_time:.2f}秒")
+    print(f"Meta-learning task generation time: {time.time() - start_time:.2f} seconds")
     
-    # 创建元学习模型
+    # Create meta-learning model
     models[meta_model_name] = create_meta_dnn_from_config(
         input_dim=meta_tasks[0][0].shape[1],
         payloadBits_per_OFDM=simulator.payloadBits_per_OFDM,
         config=config
     )
     
-    # 创建验证集
+    # Create validation set
     meta_x_test, meta_y_test = simulator.generate_testing_dataset(
         "random_mixed", 
         dataset_params["test_samples"] // 5
     )
     
-    # 训练元模型
-    print("开始元学习训练...")
+    # Train meta-model
+    print("Starting meta-learning training...")
     start_time = time.time()
     losses, val_errs, update_counts = models["Meta_DNN"].train_reptile(
         meta_tasks, 
@@ -1635,9 +2075,9 @@ if __name__ == "__main__":
         meta_validation_data=(meta_x_test, meta_y_test),
         task_steps=config.config["meta_dnn"]["task_steps"]
     )
-    print(f"元学习训练耗时: {time.time() - start_time:.2f}秒")
+    print(f"Meta-learning training time: {time.time() - start_time:.2f} seconds")
     
-    # 记录元模型数据
+    # Record meta-model data
     MultiModelBCP.log_manual_data(
         "Meta_DNN_train",
         losses,
@@ -1646,56 +2086,57 @@ if __name__ == "__main__":
         dataset_type="meta"
     )
     
-    # 绘制更新对比图
+    # Plot update comparison chart
     plot_file = os.path.join(log_dir, f"update_comparison_{experiment_time}.png")
     dpi = output_params.get("plot_dpi", 300)
     MultiModelBCP.plot_by_updates(save_path=plot_file, dpi=dpi)
     
-    # 释放不再需要的模型和数据
+    # Free up no longer needed models and data
     del losses, val_errs, update_counts, meta_x_test, meta_y_test, meta_tasks
     gc.collect()
     
-    # 3GPP泛化测试阶段
-    print("\n=== 3GPP泛化测试阶段 ===")
+    # WINNER II Generalization Test Phase
+    print("\n=== WINNER II Generalization Test Phase ===")
     MultiModelBCP.clear_data()
     
-    # 获取微调参数
+    # Get fine-tuning parameters
     fine_tuning_params = config.get_fine_tuning_params()
     val_parameter_set = []
     for size in dataset_params["fine_tuning_sizes"]:
         batch_size = fine_tuning_params["batch_sizes"].get(str(size), 32)
-        val_parameter_set.append((size, batch_size))
+        val_epoch = fine_tuning_params["epochs"].get(str(size), 32)
+        val_parameter_set.append((size,val_epoch, batch_size))
     
-    # 创建验证集
-    x_3gpp_val, y_3gpp_val = simulator.generate_testing_dataset(
+    # Create validation set
+    x_WINNER_val, y_WINNER_val = simulator.generate_testing_dataset(
         dataset_params["test_channel"], 
         dataset_params["test_samples"] // 8
     )
     val_epoch = fine_tuning_params["epochs"]
     
-    for size, val_batch_size in val_parameter_set:
+    for size, val_epoch,val_batch_size in val_parameter_set:
         DNN_num_update = int((size/val_batch_size)*val_epoch)
-        print(f"{size}样本集，更新次数: {DNN_num_update}")
+        print(f"{size} sample set, updates: {DNN_num_update}")
         
-        # 生成3GPP训练数据
+        # Generate WINNER training data
         bits_array = simulator.generate_bits(size)
-        x_3gpp_train, y_3gpp_train = simulator.generate_training_dataset(
+        x_WINNER_train, y_WINNER_train = simulator.generate_training_dataset(
             dataset_params["test_channel"], 
             bits_array
         )
         
-        # 转换为TensorFlow数据集
+        # Convert to TensorFlow dataset
         train_dataset = create_tf_dataset(
-            x_3gpp_train, y_3gpp_train, 
+            x_WINNER_train, y_WINNER_train, 
             batch_size=val_batch_size,
             repeat=False
         )
         
-        # 传统DNN微调
+        # Traditional DNN fine-tuning
         for channel in channel_types:
-            model_name = f"DNN_{channel}_3GPP_{size}"
+            model_name = f"DNN_{channel}_WINNER_{size}"
             dnn_model = models[f"DNN_{channel}"].clone()
-            print(f"\n验证 {channel} 通道，样本量: {size}")
+            print(f"\nValidating {channel} channel, sample size: {size}")
             
             callback = MultiModelBCP(
                 model_name=model_name, 
@@ -1707,27 +2148,27 @@ if __name__ == "__main__":
             dnn_model.fit(
                 train_dataset,
                 epochs=val_epoch,
-                validation_data=(x_3gpp_val, y_3gpp_val),
+                validation_data=(x_WINNER_val, y_WINNER_val),
                 callbacks=[callback],
                 verbose=1
             )
             
-            # 释放模型内存
+            # Free model memory
             del dnn_model
             gc.collect()
         
-        # Meta DNN微调
-        meta_task_3gpp = [(x_3gpp_train, y_3gpp_train)]
+        # Meta DNN fine-tuning
+        meta_task_WINNER = [(x_WINNER_train, y_WINNER_train)]
         meta_model = models["Meta_DNN"].clone()
         meta_model_name = f"Meta_{size}"
         
-        # 根据数据集大小调整内部步数
+        # Adjust inner steps based on dataset size
         task_steps = min(config.config["meta_dnn"]["task_steps"], size//5)
         
         losses, val_errs, update_counts = meta_model.train_reptile(
-            meta_task_3gpp, 
+            meta_task_WINNER, 
             meta_epochs=DNN_num_update, 
-            meta_validation_data=(x_3gpp_val, y_3gpp_val),
+            meta_validation_data=(x_WINNER_val, y_WINNER_val),
             task_steps=task_steps
         )
         
@@ -1736,31 +2177,31 @@ if __name__ == "__main__":
             losses,
             val_errs,
             update_counts=update_counts,
-            dataset_type=f"3gpp_{size}"
+            dataset_type=f"WINNER_{size}"
         )
         
-        # 释放元模型和数据
-        del meta_model, losses, val_errs, update_counts, meta_task_3gpp
-        del x_3gpp_train, y_3gpp_train, train_dataset
+        # Free meta-model and data
+        del meta_model, losses, val_errs, update_counts, meta_task_WINNER
+        del x_WINNER_train, y_WINNER_train, train_dataset
         gc.collect()
     
-    # 绘制最终结果
-    final_plot_file = os.path.join(log_dir, f"3gpp_generalization_test_{experiment_time}.png")
+    # Plot final results
+    final_plot_file = os.path.join(log_dir, f"WINNER_generalization_test_{experiment_time}.png")
     MultiModelBCP.plot_by_updates(save_path=final_plot_file, dpi=dpi)
 
     output_dir = f"matlab_exports/experiment_{experiment_time}"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    # 导出模型数据
-    print("\n=== 导出模型数据到MATLAB ===")
+    # Export model data
+    print("\n=== Exporting Model Data to MATLAB ===")
     exported_files = MultiModelBCP.export_data_for_matlab(
         output_dir=output_dir,
         format="mat",
         prefix=f"ofdm_models_{experiment_time}_"
     )
 
-    # 生成MATLAB分析脚本
+    # Generate MATLAB analysis script
     matlab_script = MultiModelBCP.generate_matlab_script(
         output_dir=output_dir,
         exported_files=exported_files,
@@ -1768,15 +2209,15 @@ if __name__ == "__main__":
         sample_sizes=dataset_params["fine_tuning_sizes"]
     )
 
-    print(f"\n数据导出完成! 结果保存在: {output_dir}")
+    print(f"\nData export complete! Results saved in: {output_dir}")
     
-    # 释放所有模型和回调数据
+    # Free all models and callback data
     models.clear()
     MultiModelBCP.clear_data()
     gc.collect()
     
-    print(f"\n实验完成! 结果已保存到 {log_dir} 目录")
-    print(f"配置文件: {config_path}")
-    print(f"全局参数文件: {global_params_path}")
-    print(f"更新对比图: {plot_file}")
-    print(f"泛化测试图: {final_plot_file}")
+    print(f"\nExperiment complete! Results saved to the {log_dir} directory")
+    print(f"Configuration file: {config_path}")
+    print(f"Global parameters file: {global_params_path}")
+    print(f"Update comparison chart: {plot_file}")
+    print(f"Generalization test chart: {final_plot_file}")

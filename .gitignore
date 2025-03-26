@@ -1,5 +1,12 @@
-experiment_config/
+experiment_configs/
 experiment_logs/
 matlab_exports/
 misc/
-
+global_parameters.py
+new_global_parameters.py
+gpu_test.py
+channel_train.npy
+.vscode/
+__pycache__/
+*.pyc
+*.pyo

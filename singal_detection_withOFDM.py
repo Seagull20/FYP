@@ -1,3 +1,4 @@
+import argparse
 from enum import auto
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -14,6 +15,8 @@ import matplotlib.pyplot as plt
 import time
 import gc
 from datetime import datetime
+
+from ExperimentConfig import ExperimentConfig, apply_config_to_simulator, create_meta_dnn_from_config
 
 class MultiModelBCP(Callback):
     """
@@ -204,7 +207,7 @@ class MultiModelBCP(Callback):
 
 
     @staticmethod
-    def plot_by_updates(save_path="update_comparison.png", models_to_plot=None, dpi=150):
+    def plot_by_updates(save_path="update_comparison.png", models_to_plot=None, dpi=300):
         """
         Plot learning curves based on parameter updates for direct comparison between models.
         Particularly useful for comparing models trained with different batch sizes or optimizers.
@@ -224,6 +227,9 @@ class MultiModelBCP(Callback):
         
         plt.figure(figsize=(10, 8))
         
+        # Store the models and their final values for legend ordering
+        models_with_final_values = []
+        
         for model_name, data in MultiModelBCP.all_models_data.items():
             # If models_to_plot is specified, only plot the specified models
             if models_to_plot and model_name not in models_to_plot:
@@ -234,14 +240,47 @@ class MultiModelBCP(Callback):
                 bit_errs = data["metrics_by_updates"]["val_bit_err"]
                 
                 if update_counts and bit_errs:
-                    plt.plot(update_counts, bit_errs, 
+                    # Plot the learning curve
+                    line, = plt.plot(update_counts, bit_errs, 
                             label=f"{model_name}", marker='s', markersize=3)
+                    
+                    # Get the final BER value
+                    final_ber = bit_errs[-1]
+                    final_update = update_counts[-1]
+                    
+                    # Store the model with its final value for later sorting
+                    models_with_final_values.append((model_name, final_ber, final_update, line))
+                    
+                    # Add annotation for the final BER value
+                    plt.annotate(
+                        f'{final_ber:.6f}',  # Text with 6 decimal places
+                        xy=(final_update, final_ber),  # Point to annotate
+                        xytext=(10, 0),  # Offset text by 10 points to the right
+                        textcoords='offset points',  # Use offset for text position
+                        ha='left',  # Horizontal alignment
+                        va='center',  # Vertical alignment
+                        fontsize=9,  # Font size
+                        bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.7)  # Add a background box
+                    )
+        
+        # Sort models by final BER values for the legend
+        models_with_final_values.sort(key=lambda x: x[1])  # Sort by final BER
+        
+        # Reorder the legend to match the sorted models
+        handles = [model[3] for model in models_with_final_values]
+        labels = [f"{model[0]} ({model[1]:.6f})" for model in models_with_final_values]
         
         plt.xlabel("Number of Parameter Updates")
-        plt.ylabel("Val_Bit Error Rate")
-        plt.title("Val_Bit Error Rate vs Parameter Updates")
+        plt.ylabel("Validation Bit Error Rate")
+        plt.title("Validation Bit Error Rate vs Parameter Updates")
         plt.grid(True, linestyle='--', alpha=0.7)
-        plt.legend(loc="best")
+        
+        # Add sorted legend with BER values included
+        plt.legend(handles, labels, loc="best", fontsize=9)
+        
+        # Auto-adjust y-axis limits to add some padding
+        y_min, y_max = plt.ylim()
+        plt.ylim(max(0, y_min * 0.95), y_max * 1.1)  # Add padding at the top for annotations
         
         plt.tight_layout()
         plt.savefig(save_path, dpi=dpi, bbox_inches='tight')
@@ -268,427 +307,430 @@ class MultiModelBCP(Callback):
                     del MultiModelBCP.all_models_data[name]
 
     @staticmethod
-    def export_data_for_matlab(output_dir="matlab_exports", format="all", prefix=""):
+    def export_data_for_matlab(output_dir="matlab_exports", prefix=""):
         """
-        Export training data from all models to MATLAB-compatible formats.
+        Export all model data to MATLAB compatible format.
+        
+        This function performs special processing for Meta model data, ensuring all models
+        have consistent data structures, especially extracting validation metrics and
+        converting them to a uniform format.
         
         Args:
-            output_dir (str): Directory path to save exported files
-            format (str): Output format ('csv', 'mat', 'json', or 'all')
-            prefix (str): Prefix for exported filenames
+            output_dir: Directory path to save exported files
+            prefix: Prefix for exported filenames
             
         Returns:
-            list: List of paths to exported files
+            list: List of exported file paths
         """
         from datetime import datetime
+        import os
+        import numpy as np
         
-        # Return early if all_models_data is not initialized
+        # If all_models_data is not initialized, return early
         if not hasattr(MultiModelBCP, "all_models_data") or not MultiModelBCP.all_models_data:
-            print("Warning: No model data available to export.")
+            print("Warning: No model data available for export.")
             return []
         
-        # Use timestamp as prefix if none provided
+        # If no prefix is provided, use timestamp
         if not prefix:
             prefix = f"model_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
         
-        # Import MatlabExport class
+        # Create output directory
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        # Try to export in MAT format
         try:
-            # Assuming MatlabExport class is defined in a separate file
-            from matlab_export import MatlabExport
-        except ImportError:
-            # If import fails, we would need to define MatlabExport class
-            # Code for MatlabExport class would be pasted here
-            pass
-        
-        exported_files = []
-        
-        # Export data based on requested format
-        if format.lower() in ["csv", "all"]:
-            csv_files = MatlabExport.export_to_csv(
-                MultiModelBCP.all_models_data, 
-                output_dir=output_dir, 
-                prefix=prefix
-            )
-            exported_files.extend(csv_files)
-            print(f"Exported {len(csv_files)} CSV files to {output_dir}")
-        
-        if format.lower() in ["mat", "all"]:
+            # Create output path
+            mat_file = os.path.join(output_dir, f"{prefix}model_data.mat")
+            
+            # Try to import scipy.io
             try:
-                mat_files = MatlabExport.export_to_mat(
-                    MultiModelBCP.all_models_data, 
-                    output_dir=output_dir, 
-                    prefix=prefix
-                )
-                exported_files.extend(mat_files)
-                if mat_files:
-                    print(f"Exported MAT file to {mat_files[0]}")
-            except Exception as e:
-                print(f"Error exporting MAT file: {e}")
+                from scipy import io as spio
+            except ImportError:
+                print("Error: scipy installation required for MAT file export.")
+                return []
+            
+            # Helper function to recursively process complex data types
+            def process_complex_data(data):
+                """Recursively process data, convert to MATLAB compatible types"""
+                import tensorflow as tf
+                
+                # Process TensorFlow tensors
+                if isinstance(data, tf.Tensor):
+                    return data.numpy() if hasattr(data, 'numpy') else np.array([float(data)])
+                
+                # Process NumPy arrays
+                elif isinstance(data, np.ndarray):
+                    return data.tolist() if data.ndim > 0 else float(data)
+                
+                # Process NumPy numeric types
+                elif isinstance(data, (np.float32, np.float64, np.int32, np.int64)):
+                    return float(data)
+                
+                # Process dictionaries - recursively process all values
+                elif isinstance(data, dict):
+                    return {k: process_complex_data(v) for k, v in data.items()}
+                
+                # Process lists or tuples - recursively process all elements
+                elif isinstance(data, (list, tuple)):
+                    return [process_complex_data(item) for item in data]
+                
+                # Return other types
+                return data
+            
+            # Special handling for Meta model data
+            def normalize_meta_data(model_data, model_name):
+                """Ensure Meta model data structures are consistent with DNN models"""
+                processed = model_data.copy()
+                
+                # Check if it's a Meta model
+                if "Meta" in model_name:
+                    # Ensure metrics_by_updates has val_bit_err field as a simple array
+                    if "metrics_by_updates" in processed:
+                        metrics = processed["metrics_by_updates"]
+                        
+                        # If val_bit_err exists but has complex type, try to extract to 1D array
+                        if "val_bit_err" in metrics:
+                            val_bit_err = metrics["val_bit_err"]
+                            
+                            # If it's a dictionary, extract numeric array from it
+                            if isinstance(val_bit_err, dict):
+                                # Try to find a key containing numeric values
+                                for k, v in val_bit_err.items():
+                                    if isinstance(v, (list, np.ndarray)) and len(v) > 0:
+                                        metrics["val_bit_err"] = process_complex_data(v)
+                                        print(f"Extracted val_bit_err for {model_name} from dictionary to array")
+                                        break
+                            else:
+                                # Ensure it's a simple array
+                                metrics["val_bit_err"] = process_complex_data(val_bit_err)
+                        
+                        # Process val_update_counts field
+                        if "val_update_counts" in metrics:
+                            metrics["val_update_counts"] = process_complex_data(metrics["val_update_counts"])
+                    
+                    # Extract directly from model-level val_epoch_bit_err field
+                    if "val_epoch_bit_err" in processed and isinstance(processed["val_epoch_bit_err"], (list, np.ndarray)):
+                        val_err = process_complex_data(processed["val_epoch_bit_err"])
+                        
+                        # If metrics_by_updates.val_bit_err doesn't exist or is empty, use val_epoch_bit_err
+                        if ("metrics_by_updates" not in processed or 
+                            "val_bit_err" not in processed["metrics_by_updates"] or 
+                            not processed["metrics_by_updates"]["val_bit_err"]):
+                            
+                            if "metrics_by_updates" not in processed:
+                                processed["metrics_by_updates"] = {}
+                            
+                            processed["metrics_by_updates"]["val_bit_err"] = val_err
+                            print(f"Using val_epoch_bit_err for {model_name} as metrics_by_updates.val_bit_err")
+                            
+                            # If no val_update_counts, create a simple sequence
+                            if "val_update_counts" not in processed["metrics_by_updates"] or not processed["metrics_by_updates"]["val_update_counts"]:
+                                processed["metrics_by_updates"]["val_update_counts"] = list(range(1, len(val_err) + 1))
+                
+                return processed
+            
+            # Process all model data
+            processed_data = {}
+            for model_name, model_data in MultiModelBCP.all_models_data.items():
+                # Replace invalid characters in variable names
+                valid_name = model_name.replace('-', '_').replace('.', '_').replace(' ', '_')
+                
+                # Special handling for Meta models
+                normalized_data = normalize_meta_data(model_data, model_name)
+                
+                # Recursively process all data to ensure MATLAB compatibility
+                processed_model = process_complex_data(normalized_data)
+                
+                # Add to processed data dictionary
+                processed_data[valid_name] = processed_model
+                
+                # Print diagnostic information
+                if "Meta" in model_name:
+                    has_val_bit_err = ("metrics_by_updates" in processed_model and 
+                                    "val_bit_err" in processed_model["metrics_by_updates"] and 
+                                    processed_model["metrics_by_updates"]["val_bit_err"])
+                    print(f"Validation metrics status for model {model_name}: {'contains valid val_bit_err' if has_val_bit_err else 'missing val_bit_err'}")
+            
+            # Add sample sizes and test channel info (helps MATLAB scripts)
+            # Extract sample sizes
+            sample_sizes = []
+            for model_name in processed_data.keys():
+                if "Meta_" in model_name:
+                    # Match Meta_NUMBER format
+                    import re
+                    matches = re.findall(r'Meta_(\d+)', model_name)
+                    if matches:
+                        size = int(matches[0])
+                        if size not in sample_sizes:
+                            sample_sizes.append(size)
+            
+            # If sample sizes found, add to export data
+            if sample_sizes:
+                processed_data["sample_sizes"] = sorted(sample_sizes)
+                print(f"Added sample size information: {sorted(sample_sizes)}")
+            
+            # Detect test channel (assumed to be extracted from model names)
+            test_channel = None
+            for model_name in processed_data.keys():
+                if "DNN_" in model_name:
+                    # Match DNN_CHANNEL_TESTCHANNEL_SIZE format
+                    parts = model_name.split('_')
+                    if len(parts) >= 4:
+                        test_channel = parts[2]
+                        break
+            
+            # If test channel found, add to export data
+            if test_channel:
+                processed_data["testing_channel"] = test_channel
+                print(f"Added test channel information: {test_channel}")
+            
+            # Save to MAT file
+            spio.savemat(mat_file, processed_data)
+            
+            print(f"Data exported to MAT file: {mat_file}")
+            return [mat_file]
         
-        if format.lower() in ["json", "all"]:
-            json_files = MatlabExport.export_to_json(
-                MultiModelBCP.all_models_data, 
-                output_dir=output_dir, 
-                prefix=prefix
-            )
-            exported_files.extend(json_files)
-            print(f"Exported JSON file to {json_files[0]}")
+        except Exception as e:
+            print(f"Error exporting to MAT file: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return []
         
-        return exported_files
-
-    @staticmethod
     def generate_matlab_script(output_dir="matlab_exports", exported_files=None, prefix="", 
-                            sample_sizes=None):
+                        sample_sizes=None, testing_channel="rician", training_channels=None):
         """
-        Generate a MATLAB script for loading and analyzing exported data
+        Generate MATLAB script based on the fixed data structure for visualizing 
+        performance comparisons of different models across sample sizes.
         
         Parameters:
-            output_dir: Export directory path
-            exported_files: List of exported file paths
-            prefix: File name prefix
-            sample_sizes: List of sample sizes, such as [50, 100, 500, 1000]
+            output_dir: Output directory path
+            exported_files: List of exported .mat file paths
+            prefix: Filename prefix
+            sample_sizes: List of sample sizes, e.g. [50, 100, 500, 1000]
+            testing_channel: Channel type used for testing
+            training_channels: List of channel types used for training
             
         Returns:
-            Path to the MATLAB script file
+            Path to the generated MATLAB script
         """
         from datetime import datetime
         import os
         
         if not prefix:
             prefix = f"model_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
-            
-        script_path = os.path.join(output_dir, f"{prefix}analyze_data.m")
-        
-        # 检测导出的文件格式
-        has_mat = any(f.endswith('.mat') for f in exported_files) if exported_files else False
-        has_csv = any(f.endswith('.csv') for f in exported_files) if exported_files else False
-        has_json = any(f.endswith('.json') for f in exported_files) if exported_files else False
+                
+        script_path = os.path.join(output_dir, f"{prefix}generalization_visualization.m")
         
         with open(script_path, 'w') as f:
-            f.write("%% OFDM Model Training Results Analysis\n")
-            f.write("% This script is auto-generated by Python for analyzing model training data\n\n")
+            # MATLAB script header
+            f.write("%% OFDM Signal Detection - Generalization Testing Visualization\n")
+            f.write("% This script visualizes how different models perform after fine-tuning on different sample sizes\n\n")
             
             f.write("% Clear workspace and close all figures\n")
             f.write("clear;\n")
             f.write("close all;\n\n")
             
-            f.write("% Set default figure properties\n")
+            f.write("% Set figure properties\n")
             f.write("set(0, 'DefaultFigureColor', 'white');\n")
             f.write("set(0, 'DefaultAxesFontSize', 12);\n")
             f.write("set(0, 'DefaultLineLineWidth', 1.5);\n\n")
             
-            # Add sample size array definition
-            if sample_sizes:
-                f.write("% Define sample size array\n")
-                f.write(f"sample_sizes = [{', '.join(map(str, sample_sizes))}];\n\n")
-                
-             # Add loading code based on exported file formats
-            if has_mat:
-                # Find the first .mat file
-                mat_files = [f for f in exported_files if f.endswith('.mat')]
-                if mat_files:
-                    mat_file_basename = os.path.basename(mat_files[0])
-                    f.write("% Load MAT file data\n")
-                    f.write(f"load('{mat_file_basename}');\n\n")
+            # Load .mat files
+            mat_files = [f for f in exported_files if f.endswith('.mat')]
+            if mat_files:
+                mat_file_basename = os.path.basename(mat_files[0])
+                f.write("% Load the data file\n")
+                f.write(f"load('{mat_file_basename}');\n\n")
 
-                    f.write("% Get and display all model names\n")
-                    f.write("vars = whos;\n")  # Use whos to get information about loaded variables
-                    f.write("model_names = {vars.name};\n")  # Extract variable names
-                    f.write("fprintf('Loaded models: \\n');\n")
-                    f.write("for i = 1:length(model_names)\n")
-                    f.write("    fprintf('  %s\\n', model_names{i});\n")
-                    f.write("end\n\n")
-
-                    f.write("% Create models struct and put all models in it (for easier processing)\n")
-                    f.write("models = struct();\n")
-                    f.write("for i = 1:length(model_names)\n")
-                    f.write("    models.(model_names{i}) = eval(model_names{i});\n")
-                    f.write("end\n\n")
-                    
-                    f.write("% Analyze validation error rate\n")
-                    f.write("figure('Name', 'Val_BER Comparison', 'Position', [100, 100, 1200, 600]);\n")
-                    f.write("hold on;\n")
-                    f.write("legends = {};\n")
-                    f.write("for i = 1:length(model_names)\n")
-                    f.write("    model = models.(model_names{i});\n")
-                    f.write("    try\n")
-                    f.write("        if isfield(model, 'metrics_by_updates') && isfield(model.metrics_by_updates, 'val_update_counts') && isfield(model.metrics_by_updates, 'val_bit_err')\n")
-                    f.write("            plot(model.metrics_by_updates.val_update_counts, model.metrics_by_updates.val_bit_err, 'LineWidth', 2);\n")
-                    f.write("            legends{end+1} = strrep(model_names{i}, '_', '\\_');\n")
-                    f.write("        end\n")
-                    f.write("    catch e\n")
-                    f.write("        fprintf('Error processing model %s: %s\\n', model_names{i}, e.message);\n")
-                    f.write("    end\n")
-                    f.write("end\n")
-                    f.write("if ~isempty(legends)\n")
-                    f.write("    xlabel('Update Count');\n")
-                    f.write("    ylabel('Val_BER');\n")
-                    f.write("    title('Comparison of Val_BER on the Val_Set for Different Models');\n")
-                    f.write("    grid on;\n")
-                    f.write("    legend(legends, 'Location', 'best');\n")
-                    f.write("    set(gca, 'YScale', 'log');\n")  # Using log scale may better display error rates
-                    f.write("else\n")
-                    f.write("    title('No valid validation error rate data found');\n")
-                    f.write("end\n")
-                    f.write("hold off;\n\n")
-                    
-                    f.write("% Analyze training loss\n")
-                    f.write("figure('Name', 'Training Loss Comparison', 'Position', [100, 100, 1200, 600]);\n")
-                    f.write("hold on;\n")
-                    f.write("legends = {};\n")
-                    f.write("for i = 1:length(model_names)\n")
-                    f.write("    try\n")
-                    f.write("        model = models.(model_names{i});\n")
-                    f.write("        if isfield(model, 'metrics_by_updates') && isfield(model.metrics_by_updates, 'loss')\n")
-                    f.write("            if isfield(model, 'update_counts') && ~isempty(model.update_counts)\n")
-                    f.write("                plot(model.update_counts, model.metrics_by_updates.loss, 'LineWidth', 2);\n")
-                    f.write("            else\n")
-                    f.write("                plot(model.metrics_by_updates.loss, 'LineWidth', 2);\n")
-                    f.write("            end\n")
-                    f.write("            legends{end+1} = strrep(model_names{i}, '_', '\\_');\n")
-                    f.write("        end\n")
-                    f.write("    catch e\n")
-                    f.write("        fprintf('Error processing training loss for model %s: %s\\n', model_names{i}, e.message);\n")
-                    f.write("    end\n")
-                    f.write("end\n")
-                    f.write("if ~isempty(legends)\n")
-                    f.write("    xlabel('Update Count');\n")
-                    f.write("    ylabel('Train Loss');\n")
-                    f.write("    title('Comparison of Training Loss for Different Models');\n")
-                    f.write("    grid on;\n")
-                    f.write("    legend(legends, 'Location', 'best');\n")
-                    f.write("else\n")
-                    f.write("    title('No valid training loss data found');\n")
-                    f.write("end\n")
-                    f.write("hold off;\n\n")
-                    
-                     # Add call to sample size comparison function
-                    f.write("% Plot performance comparison of models across different sample sizes\n")
-                    if sample_sizes:
-                        f.write("plot_sample_size_comparison(models, sample_sizes);\n\n")
-                    else:
-                        f.write("try\n")
-                        f.write("    % Try to automatically extract sample sizes and plot comparison\n")
-                        f.write("    plot_sample_size_comparison(models);\n")
-                        f.write("catch e\n")
-                        f.write("    fprintf('Error plotting sample size comparison: %s\\n', e.message);\n")
-                        f.write("    fprintf('You can manually call: plot_sample_size_comparison(models, [50, 100, 500, 1000])\\n');\n")
-                        f.write("end\n\n")
-                    
-                else:
-                    f.write("% No .mat file found\n\n")
-                    
-            elif has_json:
-                f.write("% Load JSON file data\n")
-                f.write("try\n")
-                
-                json_files = [f for f in exported_files if f.endswith('.json')]
-                if json_files:
-                    json_file_basename = os.path.basename(json_files[0])
-                    f.write("    json_file = fopen('" + json_file_basename + "');\n")
-                    f.write("    json_str = char(fread(json_file, inf))';\n")
-                    f.write("    fclose(json_file);\n")
-                    f.write("    model_data = jsondecode(json_str);\n")
-                    f.write("    fprintf('Successfully loaded JSON data\\n');\n")
-                    
-                    f.write("    % Get model names\n")
-                    f.write("    model_names = fieldnames(model_data);\n")
-                    f.write("    fprintf('Loaded models: \\n');\n")
-                    f.write("    for i = 1:length(model_names)\n")
-                    f.write("        fprintf('  %s\\n', model_names{i});\n")
-                    f.write("    end\n\n")
-                    
-                    # Add JSON data analysis code
-                    f.write("    % Analyze validation error rate\n")
-                    f.write("    figure('Name', 'JSON Data: Validation Error Rate Comparison', 'Position', [100, 100, 1200, 600]);\n")
-                    f.write("    hold on;\n")
-                    f.write("    % Analysis code...\n")
-                    
-                    # Add call to sample size comparison function
-                    f.write("    % Plot performance comparison of models across different sample sizes\n")
-                    if sample_sizes:
-                        f.write("    plot_sample_size_comparison(model_data, sample_sizes);\n\n")
-                    else:
-                        f.write("    try\n")
-                        f.write("        % Try to automatically extract sample sizes and plot comparison\n")
-                        f.write("        plot_sample_size_comparison(model_data);\n")
-                        f.write("    catch e\n")
-                        f.write("        fprintf('Error plotting sample size comparison: %s\\n', e.message);\n")
-                        f.write("        fprintf('You can manually call: plot_sample_size_comparison(model_data, [50, 100, 500, 1000])\\n');\n")
-                        f.write("    end\n\n")
-                
-                f.write("catch e\n")
-                f.write("    fprintf('Failed to load JSON data: %s\\n', e.message);\n")
+                f.write("% Print loaded models\n")
+                f.write("vars = whos;\n")
+                f.write("model_names = {vars.name};\n")
+                f.write("fprintf('Loaded models: \\n');\n")
+                f.write("for i = 1:length(model_names)\n")
+                f.write("    fprintf('  %s\\n', model_names{i});\n")
                 f.write("end\n\n")
-                
-            elif has_csv:
-                f.write("% Load CSV file data\n")
-                f.write("csv_files = dir(fullfile(pwd, '*.csv'));\n")
-                f.write("fprintf('Found %d CSV files\\n', length(csv_files));\n")
-                f.write("\n")
-                f.write("% Create data structure to save all model data\n")
+
+                f.write("% Create struct for easier access\n")
                 f.write("models = struct();\n")
-                f.write("\n")
-                f.write("% Load all CSV files\n")
-                f.write("for i = 1:length(csv_files)\n")
-                f.write("    file_name = csv_files(i).name;\n")
-                f.write("    [~, name, ~] = fileparts(file_name);\n")
-                f.write("    \n")
-                f.write("    % Parse file name to get model name and data type\n")
-                f.write("    parts = strsplit(name, '_');\n")
-                f.write("    if length(parts) >= 2\n")
-                f.write("        model_name = parts{1};\n")
-                f.write("        for j = 2:length(parts)-1\n")
-                f.write("            model_name = [model_name, '_', parts{j}];\n")
-                f.write("        end\n")
-                f.write("        data_type = parts{end};\n")
-                f.write("        \n")
-                f.write("        % Create model structure (if it doesn't exist)\n")
-                f.write("        if ~isfield(models, model_name)\n")
-                f.write("            models.(model_name) = struct();\n")
-                f.write("        end\n")
-                f.write("        \n")
-                f.write("        % Read data\n")
-                f.write("        try\n")
-                f.write("            data = readtable(file_name);\n")
-                f.write("            models.(model_name).(data_type) = data;\n")
-                f.write("            fprintf('Loaded: %s (%s)\\n', model_name, data_type);\n")
-                f.write("        catch e\n")
-                f.write("            fprintf('Failed to load file %s: %s\\n', file_name, e.message);\n")
-                f.write("        end\n")
+                f.write("for i = 1:length(model_names)\n")
+                f.write("    if ~strcmp(model_names{i}, 'sample_sizes') && ~strcmp(model_names{i}, 'testing_channel')\n")
+                f.write("        models.(model_names{i}) = eval(model_names{i});\n")
                 f.write("    end\n")
                 f.write("end\n\n")
                 
-                f.write("% Check if there is any loaded model data\n")
-                f.write("if ~isempty(fieldnames(models))\n")
-                f.write("    % Plot validation error rate comparison\n")
-                f.write("    figure('Name', 'Validation Error Rate Comparison', 'Position', [100, 100, 1200, 600]);\n")
-                f.write("    hold on;\n")
-                f.write("    model_names = fieldnames(models);\n")
-                f.write("    legends = {};\n")
-                f.write("    for i = 1:length(model_names)\n")
-                f.write("        try\n")
-                f.write("            model = models.(model_names{i});\n")
-                f.write("            if isfield(model, 'validation')\n")
-                f.write("                plot(model.validation.update_count, model.validation.val_bit_err, 'LineWidth', 2);\n")
-                f.write("                legends{end+1} = strrep(model_names{i}, '_', '\\_');\n")
-                f.write("            end\n")
-                f.write("        catch e\n")
-                f.write("            fprintf('Error processing model %s: %s\\n', model_names{i}, e.message);\n")
-                f.write("        end\n")
-                f.write("    end\n")
-                f.write("    if ~isempty(legends)\n")
-                f.write("        xlabel('Update Count');\n")
-                f.write("        ylabel('Validation Error Rate');\n")
-                f.write("        title('Comparison of Error Rates on Validation Set for Different Models');\n")
-                f.write("        grid on;\n")
-                f.write("        legend(legends, 'Location', 'best');\n")
-                f.write("        set(gca, 'YScale', 'log');\n")
-                f.write("    else\n")
-                f.write("        title('No valid validation data found');\n")
-                f.write("    end\n")
-                f.write("    hold off;\n\n")
-                
-                # Add call to sample size comparison function
-                f.write("    % Plot performance comparison of models across different sample sizes\n")
-                if sample_sizes:
-                    f.write("    plot_sample_size_comparison(models, sample_sizes);\n\n")
-                else:
-                    f.write("    try\n")
-                    f.write("        % Try to automatically extract sample sizes and plot comparison\n")
-                    f.write("        plot_sample_size_comparison(models);\n")
-                    f.write("    catch e\n")
-                    f.write("        fprintf('Error plotting sample size comparison: %s\\n', e.message);\n")
-                    f.write("        fprintf('You can manually call: plot_sample_size_comparison(models, [50, 100, 500, 1000])\\n');\n")
-                    f.write("    end\n\n")
-                    
+                # Use exported test channel and sample sizes
+                f.write("% Use exported test channel and sample sizes if available\n")
+                f.write("if exist('testing_channel', 'var')\n")
+                f.write("    test_channel = testing_channel;\n")
                 f.write("else\n")
-                f.write("    fprintf('Warning: Failed to load any model data\\n');\n")
+                f.write(f"    test_channel = '{testing_channel}';\n")
                 f.write("end\n\n")
                 
-            # Add data analysis functions
-            f.write("%% Custom Analysis Functions\n\n")
+                f.write("if exist('sample_sizes', 'var')\n")
+                f.write("    samples = sample_sizes;\n")
+                if sample_sizes:
+                    f.write("else\n")
+                    f.write(f"    samples = [{', '.join(map(str, sample_sizes))}];\n")
+                f.write("end\n\n")
+                
+                # Directly analyze the available models
+                if training_channels:
+                    channels_str = ", ".join([f"'{ch}'" for ch in training_channels])
+                    f.write(f"% Available training channels: [{channels_str}]\n\n")
+                
+                # Call visualization function
+                f.write("% Visualize model performance across sample sizes\n")
+                f.write("visualize_performance(models, samples, test_channel);\n\n")
+                        
+            # === Visualization Functions ===
+            f.write("%% Visualization Functions\n\n")
             
-            # Add sample size comparison function
-            f.write("% Function: Compare final performance of different models across sample sizes\n")
-            f.write("function plot_sample_size_comparison(models, sample_sizes)\n")
-            f.write("    % This function generates a grouped bar chart with sample sizes on the x-axis and\n")
-            f.write("    % validation error rate (BER) on the y-axis. Additionally, it connects the corresponding\n")
-            f.write("    % bars with a line to illustrate trends.\n")
+            # Main visualization function
+            f.write("function visualize_performance(models, sample_sizes, test_channel)\n")
+            f.write("    % This function creates a bar chart comparing model performance across different sample sizes\n")
             f.write("    % Parameters:\n")
             f.write("    %   models - Structure containing model data\n")
-            f.write("    %   sample_sizes - Array of sample sizes, e.g., [50, 100, 500, 1000]\n")
+            f.write("    %   sample_sizes - Array of sample sizes\n")
+            f.write("    %   test_channel - Testing channel type\n")
             f.write("    \n")
-            f.write("    if nargin < 1\n")
-            f.write("        error('The \"models\" parameter must be provided');\n")
+            f.write("    if nargin < 3\n")
+            f.write("        test_channel = 'rician';\n")
             f.write("    end\n")
             f.write("    \n")
-            f.write("    if nargin < 2\n")
-            f.write("        sample_sizes = extract_sample_sizes_from_models(models);\n")
-            f.write("        if isempty(sample_sizes)\n")
-            f.write("            error('Failed to extract sample sizes from model names; please provide the sample_sizes parameter manually');\n")
-            f.write("        end\n")
-            f.write("    end\n")
-            f.write("    \n")
+            f.write("    % Sort sample sizes\n")
             f.write("    sample_sizes = sort(sample_sizes);\n")
-            f.write("    model_names = fieldnames(models);\n")
-            f.write("    model_names = model_names(~strcmp(model_names, 'sample_sizes'));\n")
             f.write("    \n")
-            f.write("    base_models = {};\n")
+            f.write("    % Force debug display of all models\n")
+            f.write("    model_names = fieldnames(models);\n")
+            f.write("    fprintf('\\nAll available models in data file:\\n');\n")
+            f.write("    for i = 1:length(model_names)\n")
+            f.write("        fprintf('  %s\\n', model_names{i});\n")
+            f.write("    end\n")
+            f.write("    fprintf('\\n');\n")
+            f.write("    \n")
+            f.write("    % New approach to extract model types\n")
+            f.write("    train_channels = {};\n")
+            f.write("    \n")
+            f.write("    % First, directly identify all training channels from available models\n")
             f.write("    for i = 1:length(model_names)\n")
             f.write("        name = model_names{i};\n")
-            f.write("        if strcmp(name, 'sample_sizes')\n")
-            f.write("            continue;\n")
-            f.write("        end\n")
-            f.write("        base_name = extract_base_model_name(name);\n")
-            f.write("        if ~isempty(base_name) && ~ismember(base_name, base_models)\n")
-            f.write("            base_models{end+1} = base_name;\n")
-            f.write("        end\n")
-            f.write("    end\n")
-            f.write("    \n")
-            f.write("    fprintf('Found the following base model types:\\n');\n")
-            f.write("    for i = 1:length(base_models)\n")
-            f.write("        fprintf('  %s\\n', base_models{i});\n")
-            f.write("    end\n")
-            f.write("    \n")
-            f.write("    n_models = length(base_models);\n")
-            f.write("    n_sizes = length(sample_sizes);\n")
-            f.write("    final_errors = NaN(n_models, n_sizes);\n")
-            f.write("    \n")
-            f.write("    for i = 1:n_models\n")
-            f.write("        base_name = base_models{i};\n")
-            f.write("        for j = 1:n_sizes\n")
-            f.write("            size_str = num2str(sample_sizes(j));\n")
-            f.write("            matching_model = find_model_with_size(models, base_name, size_str);\n")
-            f.write("            if ~isempty(matching_model)\n")
-            f.write("                final_errors(i, j) = extract_final_error(models.(matching_model));\n")
+            f.write("        \n")
+            f.write("        % Only process DNN models with the test channel and a size suffix\n")
+            f.write("        if contains(name, ['DNN_']) && contains(name, ['_' test_channel '_'])\n")
+            f.write("            % Extract the size part to ensure it's a valid model\n")
+            f.write("            parts = strsplit(name, '_');\n")
+            f.write("            if length(parts) >= 4\n")
+            f.write("                % Find the test_channel part\n")
+            f.write("                test_ch_idx = 0;\n")
+            f.write("                for j = 1:length(parts)\n")
+            f.write("                    if strcmp(parts{j}, test_channel)\n")
+            f.write("                        test_ch_idx = j;\n")
+            f.write("                        break;\n")
+            f.write("                    end\n")
+            f.write("                end\n")
+            f.write("                \n")
+            f.write("                if test_ch_idx > 2\n")  
+            f.write("                    % Extract all parts between DNN_ and test_channel\n")
+            f.write("                    channel_str = strjoin(parts(2:test_ch_idx-1), '_');\n")
+            f.write("                    \n")
+            f.write("                    % Add to channels if new\n")
+            f.write("                    if ~ismember(channel_str, train_channels)\n")
+            f.write("                        train_channels{end+1} = channel_str;\n")
+            f.write("                        fprintf('Found training channel: %s\\n', channel_str);\n")
+            f.write("                    end\n")
+            f.write("                end\n")
             f.write("            end\n")
             f.write("        end\n")
             f.write("    end\n")
             f.write("    \n")
-            f.write("    figure('Name', 'Performance Comparison Across Different Sample Sizes', 'Position', [100, 100, 1200, 600]);\n")
-            f.write("    h = bar(final_errors');\n")
-            f.write("    set(gca, 'XTick', 1:n_sizes);\n")
+            f.write("    % Create base model types including Meta\n")
+            f.write("    base_models = {};\n")
+            f.write("    for i = 1:length(train_channels)\n")
+            f.write("        base_models{end+1} = ['DNN_' train_channels{i}];\n")
+            f.write("    end\n")
+            f.write("    base_models{end+1} = 'Meta';\n")
+            f.write("    \n")
+            f.write("    fprintf('\\nDetected base model types: \\n');\n")
+            f.write("    for i = 1:length(base_models)\n")
+            f.write("        fprintf('  %s\\n', base_models{i});\n")
+            f.write("    end\n")
+            f.write("    fprintf('\\n');\n")
+            f.write("    \n")
+            f.write("    % Prepare data array for plotting\n")
+            f.write("    num_models = length(base_models);\n")
+            f.write("    num_sizes = length(sample_sizes);\n")
+            f.write("    performance_data = zeros(num_models, num_sizes);\n")
+            f.write("    model_found_flags = zeros(num_models, num_sizes);\n")  # Track if model data was found
+            f.write("    \n")
+            f.write("    % Extract performance data for each model and sample size\n")
+            f.write("    for i = 1:num_models\n")
+            f.write("        base_name = base_models{i};\n")
+            f.write("        for j = 1:num_sizes\n")
+            f.write("            sample_size = sample_sizes(j);\n")
+            f.write("            sample_str = num2str(sample_size);\n")
+            f.write("            \n")
+            f.write("            % Find the corresponding model\n")
+            f.write("            model_key = find_model(models, base_name, sample_str, test_channel);\n")
+            f.write("            \n")
+            f.write("            if ~isempty(model_key)\n")
+            f.write("                % Extract error rate from model data\n")
+            f.write("                error_rate = extract_error_rate(models.(model_key));\n")
+            f.write("                performance_data(i, j) = error_rate;\n")
+            f.write("                model_found_flags(i, j) = 1;\n")
+            f.write("                fprintf('Found for %s with size %s: %s (error: %.6f)\\n', ...\n")
+            f.write("                        base_name, sample_str, model_key, error_rate);\n")
+            f.write("            else\n")
+            f.write("                fprintf('No model found for %s with size %s\\n', base_name, sample_str);\n")
+            f.write("            end\n")
+            f.write("        end\n")
+            f.write("    end\n")
+            f.write("    \n")
+            f.write("    % Filter out models with no data\n")
+            f.write("    models_with_data = sum(model_found_flags, 2) > 0;\n")
+            f.write("    if sum(models_with_data) < num_models\n")
+            f.write("        fprintf('\\nRemoving %d models with no data from plot\\n', num_models - sum(models_with_data));\n")
+            f.write("        base_models = base_models(models_with_data);\n")
+            f.write("        performance_data = performance_data(models_with_data, :);\n")
+            f.write("        num_models = length(base_models);\n")
+            f.write("    end\n")
+            f.write("    \n")
+            f.write("    % Create the bar chart\n")
+            f.write("    figure('Position', [100, 100, 1000, 600]);\n")
+            f.write("    h = bar(performance_data');\n")
+            f.write("    \n")
+            f.write("    % Configure axis\n")
+            f.write("    set(gca, 'XTick', 1:num_sizes);\n")
             f.write("    set(gca, 'XTickLabel', arrayfun(@num2str, sample_sizes, 'UniformOutput', false));\n")
-            f.write("    title('Comparison of Validation Error Rates (BER) Across Different Sample Sizes');\n")
+            f.write("    \n")
+            f.write("    % Add labels and title\n")
             f.write("    xlabel('Training Sample Size');\n")
             f.write("    ylabel('Validation Error Rate (BER)');\n")
-            f.write("    legend_labels = cellfun(@(x) strrep(x, '_', '\\_'), base_models, 'UniformOutput', false);\n")
-            f.write("    legend(h, legend_labels, 'Location', 'best');\n")
-            f.write("    x_width = 0.8;\n")
-            f.write("    group_center = 1:n_sizes;\n")
-            f.write("    for i = 1:n_models\n")
-            f.write("        offset = (i - (n_models+1)/2) * (x_width/n_models);\n")
-            f.write("        for j = 1:n_sizes\n")
-            f.write("            if ~isnan(final_errors(i,j))\n")
-            f.write("                x_pos = group_center(j) + offset;\n")
-            f.write("                text(x_pos, final_errors(i,j), sprintf('%.4f', final_errors(i,j)), ...\n")
+            f.write("    title(['Model Performance After Fine-tuning on ' test_channel ' Channel']);\n")
+            f.write("    \n")
+            f.write("    % Create legend\n")
+            f.write("    model_labels = cellfun(@make_pretty_label, base_models, 'UniformOutput', false);\n")
+            f.write("    legend(h, model_labels, 'Location', 'best');\n")
+            f.write("    \n")
+            f.write("    % Add value labels to each bar\n")
+            f.write("    width = 0.8;\n")
+            f.write("    group_centers = 1:num_sizes;\n")
+            f.write("    for i = 1:num_models\n")
+            f.write("        offset = (i - (num_models+1)/2) * (width/num_models);\n")
+            f.write("        for j = 1:num_sizes\n")
+            f.write("            value = performance_data(i, j);\n")
+            f.write("            if value > 0\n")
+            f.write("                x_pos = group_centers(j) + offset;\n")
+            f.write("                text(x_pos, value, sprintf('%.4f', value), ...\n")
             f.write("                     'HorizontalAlignment', 'center', ...\n")
             f.write("                     'VerticalAlignment', 'bottom', ...\n")
             f.write("                     'FontSize', 8);\n")
             f.write("            end\n")
             f.write("        end\n")
             f.write("    end\n")
+            f.write("    \n")
+            f.write("    % Add trend lines\n")
             f.write("    hold on;\n")
             f.write("    for i = 1:length(h)\n")
             f.write("        x_vals = h(i).XEndPoints;\n")
@@ -696,303 +738,125 @@ class MultiModelBCP(Callback):
             f.write("        plot(x_vals, y_vals, '-o', 'LineWidth', 2, 'Color', h(i).FaceColor, 'HandleVisibility', 'off');\n")
             f.write("    end\n")
             f.write("    hold off;\n")
-            f.write("    grid on;\n")
+            f.write("    \n")
+            f.write("    % Use log scale for y-axis and add grid\n")
             f.write("    set(gca, 'YScale', 'log');\n")
-            f.write("end\n\n")
-            
-            # Add helper functions
-            f.write("% Helper function: Extract sample sizes from model names\n")
-            f.write("function sample_sizes = extract_sample_sizes_from_models(models)\n")
-            f.write("    model_names = fieldnames(models);\n")
-            f.write("    sample_sizes = [];\n")
-            f.write("    \n")
-            f.write("    for i = 1:length(model_names)\n")
-            f.write("        name = model_names{i};\n")
-            f.write("        \n")
-            f.write("        % Look for pattern like '_number_'\n")
-            f.write("        pattern = '_(\d+)_';\n")
-            f.write("        matches = regexp(name, pattern, 'tokens');\n")
-            f.write("        \n")
-            f.write("        if ~isempty(matches)\n")
-            f.write("            for j = 1:length(matches)\n")
-            f.write("                size_str = matches{j}{1};\n")
-            f.write("                size_num = str2double(size_str);\n")
-            f.write("                if ~isnan(size_num) && ~ismember(size_num, sample_sizes)\n")
-            f.write("                    sample_sizes = [sample_sizes, size_num];\n")
-            f.write("                end\n")
-            f.write("            end\n")
-            f.write("        elseif contains(name, '_WINNER_')\n")
-            f.write("            % Extract number from '_WINNER_number'\n")
-            f.write("            pattern = '_WINNER_(\d+)';\n")
-            f.write("            matches = regexp(name, pattern, 'tokens');\n")
-            f.write("            if ~isempty(matches)\n")
-            f.write("                size_str = matches{1}{1};\n")
-            f.write("                size_num = str2double(size_str);\n")
-            f.write("                if ~isnan(size_num) && ~ismember(size_num, sample_sizes)\n")
-            f.write("                    sample_sizes = [sample_sizes, size_num];\n")
-            f.write("                end\n")
-            f.write("            end\n")
-            f.write("        elseif contains(name, 'Meta_')\n")
-            f.write("            % Extract number from 'Meta_number'\n")
-            f.write("            pattern = 'Meta_(\d+)';\n")
-            f.write("            matches = regexp(name, pattern, 'tokens');\n")
-            f.write("            if ~isempty(matches)\n")
-            f.write("                size_str = matches{1}{1};\n")
-            f.write("                size_num = str2double(size_str);\n")
-            f.write("                if ~isnan(size_num) && ~ismember(size_num, sample_sizes)\n")
-            f.write("                    sample_sizes = [sample_sizes, size_num];\n")
-            f.write("                end\n")
-            f.write("            end\n")
-            f.write("        end\n")
-            f.write("    end\n")
-            f.write("end\n\n")
-            
-            f.write("% Helper function: Extract base model name (excluding sample size)\n")
-            f.write("function base_name = extract_base_model_name(name)\n")
-            f.write("    % Extract base model name, ignoring sample size part\n")
-            f.write("    \n")
-            f.write("    % For DNN-type models\n")
-            f.write("    if contains(name, 'DNN_')\n")
-            f.write("        if contains(name, '_WINNER_')\n")
-            f.write("            % DNN_channel_WINNER_size format\n")
-            f.write("            parts = strsplit(name, '_WINNER_');\n")
-            f.write("            base_name = parts{1};\n")
-            f.write("        else\n")
-            f.write("            % Only DNN_channel format\n")
-            f.write("            base_name = name;\n")
-            f.write("        end\n")
-            f.write("    % For Meta-type models\n")
-            f.write("    elseif contains(name, 'Meta_')\n")
-            f.write("        if ~contains(name, 'Meta_DNN') % Exclude cases like Meta_DNN_train\n")
-            f.write("            % Meta_size format, use Meta as base name\n")
-            f.write("            base_name = 'Meta';\n")
-            f.write("        else\n")
-            f.write("            base_name = name;\n")
-            f.write("        end\n")
-            f.write("    else\n")
-            f.write("        % Other cases, return original name\n")
-            f.write("        base_name = name;\n")
-            f.write("    end\n")
-            f.write("end\n\n")
-            
-            f.write("% Helper function: Find model with specific base name and sample size\n")
-            f.write("function model_name = find_model_with_size(models, base_name, size_str)\n")
-            f.write("    model_names = fieldnames(models);\n")
-            f.write("    model_name = '';\n")
-            f.write("    \n")
-            f.write("    % Try different matching patterns based on base model type\n")
-            f.write("    if strcmp(base_name, 'Meta')\n")
-            f.write("        % Meta model naming pattern is Meta_size\n")
-            f.write("        pattern = ['Meta_' size_str '$'];\n")
-            f.write("        for i = 1:length(model_names)\n")
-            f.write("            if ~isempty(regexp(model_names{i}, pattern, 'once'))\n")
-            f.write("                model_name = model_names{i};\n")
-            f.write("                return;\n")
-            f.write("            end\n")
-            f.write("        end\n")
-            f.write("    else\n")
-            f.write("        % DNN model naming pattern is DNN_channel_WINNER_size\n")
-            f.write("        pattern = [base_name '_WINNER_' size_str '];\n")
-            f.write("        for i = 1:length(model_names)\n")
-            f.write("            if ~isempty(regexp(model_names{i}, pattern, 'once'))\n")
-            f.write("                model_name = model_names{i};\n")
-            f.write("                return;\n")
-            f.write("            end\n")
-            f.write("        end\n")
-            f.write("    end\n")
-            f.write("end\n\n")
-            
-            f.write("% Helper function: Extract final validation error rate from model\n")
-            f.write("function final_error = extract_final_error(model)\n")
-            f.write("    if isfield(model, 'metrics_by_updates') && isfield(model.metrics_by_updates, 'val_bit_err') && ~isempty(model.metrics_by_updates.val_bit_err)\n")
-            f.write("        % Use data from metrics_by_updates\n")
-            f.write("        final_error = model.metrics_by_updates.val_bit_err(end);\n")
-            f.write("    elseif isfield(model, 'val_epoch_bit_err') && ~isempty(model.val_epoch_bit_err)\n")
-            f.write("        % Use data from val_epoch_bit_err\n")
-            f.write("        final_error = model.val_epoch_bit_err(end);\n")
-            f.write("    elseif isfield(model, 'validation') && isfield(model.validation, 'val_bit_err') && ~isempty(model.validation.val_bit_err)\n")
-            f.write("        % Use validation data exported from CSV\n")
-            f.write("        final_error = model.validation.val_bit_err{end};\n")
-            f.write("    else\n")
-            f.write("        % No valid data\n")
-            f.write("        final_error = NaN;\n")
-            f.write("    end\n")
-            f.write("end\n\n")
-            
-            f.write("% Function: Compare model performance across different sample sizes\n")
-            f.write("function compare_sample_sizes(models, pattern)\n")
-            f.write("    % This function compares model performance across different sample sizes\n")
-            f.write("    % Parameters:\n")
-            f.write("    %   models - Structure containing model data\n")
-            f.write("    %   pattern - String pattern for filtering models (e.g., 'WINNER_')\n")
-            f.write("    \n")
-            f.write("    if nargin < 1\n")
-            f.write("        error('The models parameter is required');\n")
-            f.write("    end\n")
-            f.write("    if nargin < 2\n")
-            f.write("        pattern = ''; % Default no filtering\n")
-            f.write("    end\n")
-            f.write("    \n")
-            f.write("    figure('Name', ['Performance Comparison Across Different Sample Sizes - ' pattern], 'Position', [100, 100, 1200, 600]);\n")
-            f.write("    hold on;\n")
-            f.write("    \n")
-            f.write("    model_names = fieldnames(models);\n")
-            f.write("    matching_models = {};\n")
-            f.write("    \n")
-            f.write("    % Filter matching models\n")
-            f.write("    for i = 1:length(model_names)\n")
-            f.write("        if isempty(pattern) || contains(model_names{i}, pattern)\n")
-            f.write("            matching_models{end+1} = model_names{i};\n")
-            f.write("        end\n")
-            f.write("    end\n")
-            f.write("    \n")
-            f.write("    legends = {};\n")
-            f.write("    % Plot matching models\n")
-            f.write("    for i = 1:length(matching_models)\n")
-            f.write("        try\n")
-            f.write("            model = models.(matching_models{i});\n")
-            f.write("            if isfield(model, 'validation')\n")
-            f.write("                plot(model.validation.update_count, model.validation.val_bit_err, 'LineWidth', 2);\n")
-            f.write("                legends{end+1} = strrep(matching_models{i}, '_', '\\_');\n")
-            f.write("            elseif isfield(model, 'metrics_by_updates') && isfield(model.metrics_by_updates, 'val_bit_err')\n")
-            f.write("                x_data = model.metrics_by_updates.val_update_counts;\n")
-            f.write("                y_data = model.metrics_by_updates.val_bit_err;\n")
-            f.write("                plot(x_data, y_data, 'LineWidth', 2);\n")
-            f.write("                legends{end+1} = strrep(matching_models{i}, '_', '\\_');\n")
-            f.write("            end\n")
-            f.write("        catch e\n")
-            f.write("            fprintf('Error processing model %s: %s\\n', matching_models{i}, e.message);\n")
-            f.write("        end\n")
-            f.write("    end\n")
-            f.write("    \n")
-            f.write("    if ~isempty(legends)\n")
-            f.write("        xlabel('Update Count');\n")
-            f.write("        ylabel('Validation Error Rate');\n")
-            f.write("        title(['Performance Comparison of ' pattern ' Models Across Different Sample Sizes']);\n")
-            f.write("        grid on;\n")
-            f.write("        legend(legends, 'Location', 'best');\n")
-            f.write("        set(gca, 'YScale', 'log');\n")
-            f.write("    else\n")
-            f.write("        title('No matching model data found');\n")
-            f.write("    end\n")
-            f.write("    hold off;\n")
-            f.write("end\n\n")
-            
-            f.write("% Function: Analyze model convergence speed\n")
-            f.write("function analyze_convergence(models, threshold)\n")
-            f.write("    % This function analyzes how many updates different models need to reach a specific performance threshold\n")
-            f.write("    % Parameters:\n")
-            f.write("    %   models - Structure containing model data\n")
-            f.write("    %   threshold - Performance threshold (e.g., 0.02 for 2% error rate)\n")
-            f.write("    \n")
-            f.write("    if nargin < 1\n")
-            f.write("        error('The models parameter is required');\n")
-            f.write("    end\n")
-            f.write("    if nargin < 2\n")
-            f.write("        threshold = 0.02; % Default threshold\n")
-            f.write("    end\n")
-            f.write("    \n")
-            f.write("    model_names = fieldnames(models);\n")
-            f.write("    convergence_updates = zeros(length(model_names), 1);\n")
-            f.write("    final_errors = zeros(length(model_names), 1);\n")
-            f.write("    valid_models = false(length(model_names), 1);\n")
-            f.write("    \n")
-            f.write("    for i = 1:length(model_names)\n")
-            f.write("        try\n")
-            f.write("            model = models.(model_names{i});\n")
-            f.write("            if isfield(model, 'validation')\n")
-            f.write("                % Find the first update count where error rate is below threshold\n")
-            f.write("                idx = find(model.validation.val_bit_err <= threshold, 1, 'first');\n")
-            f.write("                if ~isempty(idx)\n")
-            f.write("                    convergence_updates(i) = model.validation.update_count(idx);\n")
-            f.write("                    valid_models(i) = true;\n")
-            f.write("                else\n")
-            f.write("                    convergence_updates(i) = NaN; % Not converged\n")
-            f.write("                end\n")
-            f.write("                \n")
-            f.write("                % Record final performance\n")
-            f.write("                final_errors(i) = model.validation.val_bit_err(end);\n")
-            f.write("                valid_models(i) = true;\n")
-            f.write("            elseif isfield(model, 'metrics_by_updates') && isfield(model.metrics_by_updates, 'val_bit_err')\n")
-            f.write("                error_values = model.metrics_by_updates.val_bit_err;\n")
-            f.write("                update_counts = model.metrics_by_updates.val_update_counts;\n")
-            f.write("                \n")
-            f.write("                idx = find(error_values <= threshold, 1, 'first');\n")
-            f.write("                if ~isempty(idx)\n")
-            f.write("                    convergence_updates(i) = update_counts(idx);\n")
-            f.write("                    valid_models(i) = true;\n")
-            f.write("                else\n")
-            f.write("                    convergence_updates(i) = NaN; % Not converged\n")
-            f.write("                end\n")
-            f.write("                \n")
-            f.write("                final_errors(i) = error_values(end);\n")
-            f.write("                valid_models(i) = true;\n")
-            f.write("            else\n")
-            f.write("                convergence_updates(i) = NaN;\n")
-            f.write("                final_errors(i) = NaN;\n")
-            f.write("            end\n")
-            f.write("        catch e\n")
-            f.write("            fprintf('Error processing model %s: %s\\n', model_names{i}, e.message);\n")
-            f.write("            convergence_updates(i) = NaN;\n")
-            f.write("            final_errors(i) = NaN;\n")
-            f.write("        end\n")
-            f.write("    end\n")
-            f.write("    \n")
-            f.write("    % Only keep valid model data\n")
-            f.write("    valid_idx = find(valid_models);\n")
-            f.write("    if isempty(valid_idx)\n")
-            f.write("        fprintf('No valid model data found for convergence analysis\\n');\n")
-            f.write("        return;\n")
-            f.write("    end\n")
-            f.write("    \n")
-            f.write("    model_names = model_names(valid_idx);\n")
-            f.write("    convergence_updates = convergence_updates(valid_idx);\n")
-            f.write("    final_errors = final_errors(valid_idx);\n")
-            f.write("    \n")
-            f.write("    % Create results table\n")
-            f.write("    results_cell = cell(length(model_names) + 1, 3);\n")
-            f.write("    results_cell(1,:) = {'Model', 'Updates_to_Threshold', 'Final_Error'};\n")
-            f.write("    \n")
-            f.write("    for i = 1:length(model_names)\n")
-            f.write("        results_cell{i+1, 1} = model_names{i};\n")
-            f.write("        if isnan(convergence_updates(i))\n")
-            f.write("            results_cell{i+1, 2} = 'Not converged';\n")
-            f.write("        else\n")
-            f.write("            results_cell{i+1, 2} = convergence_updates(i);\n")
-            f.write("        end\n")
-            f.write("        results_cell{i+1, 3} = final_errors(i);\n")
-            f.write("    end\n")
-            f.write("    \n")
-            f.write("    % Display results\n")
-            f.write("    fprintf('Convergence Analysis Results (Threshold: %.4f):\\n', threshold);\n")
-            f.write("    disp(results_cell);\n")
-            f.write("    \n")
-            f.write("    % Plot convergence updates bar chart\n")
-            f.write("    figure('Name', 'Convergence Speed Comparison', 'Position', [100, 100, 1200, 600]);\n")
-            f.write("    \n")
-            f.write("    % Find valid convergence data\n")
-            f.write("    conv_idx = ~isnan(convergence_updates);\n")
-            f.write("    if sum(conv_idx) > 0\n")
-            f.write("        bar(convergence_updates(conv_idx));\n")
-            f.write("        set(gca, 'XTick', 1:sum(conv_idx), 'XTickLabel', model_names(conv_idx), 'XTickLabelRotation', 45);\n")
-            f.write("        ylabel(['Updates needed to reach threshold ' num2str(threshold)]);\n")
-            f.write("        title(['Convergence Speed of Different Models to ' num2str(threshold) ' Error Rate']);\n")
-            f.write("        grid on;\n")
-            f.write("    else\n")
-            f.write("        text(0.5, 0.5, 'No models reached the convergence threshold', 'HorizontalAlignment', 'center', 'Units', 'normalized');\n")
-            f.write("    end\n")
-            f.write("    \n")
-            f.write("    % Plot final error rates\n")
-            f.write("    figure('Name', 'Final Error Rate Comparison', 'Position', [100, 100, 1200, 600]);\n")
-            f.write("    bar(final_errors);\n")
-            f.write("    set(gca, 'XTick', 1:length(model_names), 'XTickLabel', model_names, 'XTickLabelRotation', 45);\n")
-            f.write("    ylabel('Final Error Rate');\n")
-            f.write("    title('Comparison of Final Error Rates Across Different Models');\n")
             f.write("    grid on;\n")
+            f.write("    \n")
+            f.write("    % Save figure\n")
+            f.write("    saveas(gcf, ['model_comparison_' test_channel '.png']);\n")
+            f.write("    saveas(gcf, ['model_comparison_' test_channel '.fig']);\n")
+            f.write("    fprintf('Figure saved as model_comparison_%s.png and .fig\\n', test_channel);\n")
+            f.write("end\n\n")
+            
+            # Model finding helper function - Enhanced to handle complex model names
+            f.write("function model_key = find_model(models, base_name, sample_str, test_channel)\n")
+            f.write("    % Find the model matching a specific base type and sample size\n")
+            f.write("    model_key = '';\n")
+            f.write("    model_names = fieldnames(models);\n")
+            f.write("    \n")
+            f.write("    if strcmp(base_name, 'Meta')\n")
+            f.write("        % Look for Meta_[size] pattern\n")
+            f.write("        pattern = ['Meta_' sample_str '$'];\n")
+            f.write("        for i = 1:length(model_names)\n")
+            f.write("            if regexp(model_names{i}, pattern)\n")
+            f.write("                model_key = model_names{i};\n")
+            f.write("                return;\n")
+            f.write("            end\n")
+            f.write("        end\n")
+            f.write("    else\n")
+            f.write("        % Handle DNN models, which might have complex naming patterns\n")
+            f.write("        if startsWith(base_name, 'DNN_')\n")
+            f.write("            % Extract the training channel part from base_name (after 'DNN_')\n")
+            f.write("            train_channel = extractAfter(base_name, 'DNN_');\n")
+            f.write("            \n")
+            f.write("            % Look for the specific pattern including training channel, test channel, and size\n")
+            f.write("            % We need to handle potential underscores within the channel names\n")
+            f.write("            expected_pattern = ['DNN_' train_channel '_' test_channel '_' sample_str];\n")
+            f.write("            \n")
+            f.write("            for i = 1:length(model_names)\n")
+            f.write("                % Strict matching - must match exactly, including all underscores\n")
+            f.write("                if strcmp(model_names{i}, expected_pattern)\n")
+            f.write("                    model_key = model_names{i};\n")
+            f.write("                    return;\n")
+            f.write("                end\n")
+            f.write("            end\n")
+            f.write("            \n")
+            f.write("            % Special handling for random_mixed which might have variant names\n")
+            f.write("            if strcmp(train_channel, 'random_mixed')\n")
+            f.write("                % Try alternative patterns in case name was modified\n")
+            f.write("                alt_patterns = {...\n")
+            f.write("                    ['DNN_random_mixed_' test_channel '_' sample_str], ...\n")
+            f.write("                    ['DNN_random_' test_channel '_' sample_str], ...\n")
+            f.write("                    ['DNN_mixed_' test_channel '_' sample_str], ...\n")
+            f.write("                    ['DNN_randomMixed_' test_channel '_' sample_str] ...\n")
+            f.write("                };\n")
+            f.write("                \n")
+            f.write("                for j = 1:length(alt_patterns)\n")
+            f.write("                    for i = 1:length(model_names)\n")
+            f.write("                        if strcmp(model_names{i}, alt_patterns{j})\n")
+            f.write("                            model_key = model_names{i};\n")
+            f.write("                            return;\n")
+            f.write("                        end\n")
+            f.write("                    end\n")
+            f.write("                end\n")
+            f.write("            end\n")
+            f.write("        end\n")
+            f.write("    end\n")
+            f.write("end\n\n")
+            
+            # Error rate extraction helper function
+            f.write("function error_rate = extract_error_rate(model)\n")
+            f.write("    % Extract the final validation error rate from model data\n")
+            f.write("    error_rate = 0;\n")
+            f.write("    \n")
+            f.write("    try\n")
+            f.write("        % First approach: from metrics_by_updates.val_bit_err\n")
+            f.write("        if isfield(model, 'metrics_by_updates') && isfield(model.metrics_by_updates, 'val_bit_err')\n")
+            f.write("            val_errors = model.metrics_by_updates.val_bit_err;\n")
+            f.write("            if ~isempty(val_errors)\n")
+            f.write("                error_rate = val_errors(end);\n")
+            f.write("                return;\n")
+            f.write("            end\n")
+            f.write("        end\n")
+            f.write("        \n")
+            f.write("        % Second approach: from val_epoch_bit_err\n")
+            f.write("        if isfield(model, 'val_epoch_bit_err') && ~isempty(model.val_epoch_bit_err)\n")
+            f.write("            error_rate = model.val_epoch_bit_err(end);\n")
+            f.write("            return;\n")
+            f.write("        end\n")
+            f.write("    catch e\n")
+            f.write("        warning('Error extracting validation error: %s', e.message);\n")
+            f.write("    end\n")
+            f.write("end\n\n")
+            
+            # Create pretty labels helper function
+            f.write("function label = make_pretty_label(base_name)\n")
+            f.write("    % Create nice-looking labels for the legend\n")
+            f.write("    if contains(base_name, 'DNN_')\n")
+            f.write("        train_channel = extractAfter(base_name, 'DNN_');\n")
+            f.write("        \n")
+            f.write("        % Handle special cases for channel types\n")
+            f.write("        if strcmp(train_channel, 'random_mixed')\n")
+            f.write("            label = 'DNN (Mixed Channels)';\n")
+            f.write("        elseif strcmp(train_channel, 'awgn')\n")
+            f.write("            label = 'DNN (AWGN)';\n")
+            f.write("        elseif strcmp(train_channel, 'rayleigh')\n")
+            f.write("            label = 'DNN (Rayleigh)';\n")
+            f.write("        elseif strcmp(train_channel, 'rician')\n")
+            f.write("            label = 'DNN (Rician)';\n")
+            f.write("        else\n")
+            f.write("            label = ['DNN (' strrep(train_channel, '_', ' ') ')'];\n")
+            f.write("        end\n")
+            f.write("    elseif strcmp(base_name, 'Meta')\n")
+            f.write("        label = 'Meta-Learning';\n")
+            f.write("    else\n")
+            f.write("        label = strrep(base_name, '_', ' ');\n")
+            f.write("    end\n")
             f.write("end\n")
-                
-        print(f"MATLAB analysis script generated at: {script_path}")
-        return script_path
+            
+            print(f"MATLAB visualization script generated: {script_path}")
+            return script_path
 
 class signal_simulator():
     """
@@ -1018,6 +882,7 @@ class signal_simulator():
         Args:
             SNR: Signal-to-noise ratio in dB (default: 10)
         """
+        self.K=K; # Number of subcarriers
         self.all_carriers = np.arange(K)
         self.pilot_carriers = self.all_carriers[::K // P]
         self.data_carriers = np.delete(self.all_carriers, self.pilot_carriers)
@@ -1176,21 +1041,32 @@ class signal_simulator():
 
         return np.asarray(mixed_samples), np.asarray(mixed_bits)
 
-    def generate_training_dataset(self, channel_type, bits_array, mode="sequential_mixed"):
+    def generate_training_dataset(self, channel_type, bits_array, mode="sequential_mixed", custom_channels=None):
         """
         Generate a training dataset for a specified channel type or mix of channels.
         
         Args:
             channel_type: Channel type or list of channel types
             bits_array: Binary data for transmission
-            mode: Dataset mixing mode when multiple channels are used
+            mode: Dataset mixing mode when multiple channels are used (default: "sequential_mixed")
+            custom_channels: Optional list of channels to use for mixing (overrides default)
             
         Returns:
             Tuple containing the training samples and their corresponding bits
         """
         if isinstance(channel_type, list) or channel_type in ["random_mixed", "sequential_mixed"]:
             if channel_type in ["random_mixed", "sequential_mixed"]:
-                channel_types = ["rician", "awgn", "rayleigh"] 
+                # Use custom_channels if provided, otherwise fall back to globals
+                if custom_channels is not None:
+                    channel_types = custom_channels
+                    print(f"Generating mixed dataset using custom channels: {channel_types}")
+                elif 'available_channel_types' in globals():
+                    channel_types = globals()['available_channel_types']
+                    print(f"Generating mixed dataset using global channels: {channel_types}")
+                else:
+                    channel_types = ["rician", "awgn", "rayleigh"]  # Last resort fallback
+                    print(f"Generating mixed dataset using fallback channels: {channel_types}")
+                
                 return self.generate_mixed_dataset(channel_types, bits_array, mode=channel_type)
             return self.generate_mixed_dataset(channel_type, bits_array, mode=mode)
         
@@ -1201,7 +1077,7 @@ class signal_simulator():
         
         return np.asarray(training_sample), bits_array
     
-    def generate_testing_dataset(self, channel_type, num_samples, mode="sequential_mixed"):
+    def generate_testing_dataset(self, channel_type, num_samples, mode="sequential_mixed",custom_channels=None):
         """
         Generate a testing dataset for a specified channel type or mix of channels.
         
@@ -1216,7 +1092,17 @@ class signal_simulator():
         bits_array = self.generate_bits(num_samples)
         if isinstance(channel_type, list) or channel_type in ["random_mixed", "sequential_mixed"]:
             if channel_type in ["random_mixed", "sequential_mixed"]:
-                channel_types = ["rician", "awgn", "rayleigh"]
+                # Use custom_channels if provided, otherwise fall back to globals
+                if custom_channels is not None:
+                    channel_types = custom_channels
+                    print(f"Generating mixed dataset using custom channels: {channel_types}")
+                elif 'available_channel_types' in globals():
+                    channel_types = globals()['available_channel_types']
+                    print(f"Generating mixed dataset using global channels: {channel_types}")
+                else:
+                    channel_types = ["rician", "awgn", "rayleigh"]  # Last resort fallback
+                    print(f"Generating mixed dataset using fallback channels: {channel_types}")
+                
                 return self.generate_mixed_dataset(channel_types, bits_array, mode=channel_type)
             return self.generate_mixed_dataset(channel_type, bits_array, mode=mode)
         
@@ -1354,7 +1240,15 @@ def create_tf_dataset(x_data, y_data, batch_size, buffer_size=10000, repeat=True
     """
     
     dataset = tf.data.Dataset.from_tensor_slices((x_data, y_data))
+    # Optimize memory copies
+    dataset = dataset.cache()
     dataset = dataset.shuffle(buffer_size=min(buffer_size, len(x_data)))
+
+    # Optimize batch processing
+    options = tf.data.Options()
+    options.experimental_optimization.map_parallelization = True
+    options.threading.max_intra_op_parallelism = 8
+    dataset = dataset.with_options(options)
     dataset = dataset.batch(batch_size)
     if repeat:
         dataset = dataset.repeat()
@@ -1380,17 +1274,20 @@ def bit_err(y_true, y_pred):
     Returns:
         The bit error rate as a scalar between 0 and 1
     """
+    pred_dtype = y_pred.dtype
+    y_sign = tf.sign(y_pred - 0.5)
+    y_true_sign = tf.cast(tf.sign(y_true - 0.5), pred_dtype)
+
     err = 1 - tf.reduce_mean(
         tf.reduce_mean(
             tf.cast(
-                tf.equal(
-                    tf.sign(y_pred - 0.5),
-                    tf.cast(tf.sign(y_true - 0.5), tf.float32)
-                ), tf.float32
+                tf.equal(y_sign, y_true_sign), 
+                pred_dtype
             ), axis=1
         )
     )
     return err
+
 
 class base_models(Model):
     """
@@ -1682,7 +1579,7 @@ class MetaDNN(base_models):
             return True
                 
         return False
-
+    
     def inner_update(self, x_task, y_task, steps=None):
         """
         Perform inner loop updates on a specific task.
@@ -1910,29 +1807,300 @@ class MetaDNN(base_models):
             self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
         return self.evaluate(x_train, y_train)
 
-if __name__ == "__main__":
-   
-    # Configure GPU memory growth to prevent TensorFlow from allocating all GPU memory at once
-    gpus = tf.config.list_physical_devices('GPU')
-    print("Available GPU devices:", tf.config.list_physical_devices('GPU'))
-    if gpus:
-            try:
-                for gpu in gpus:
-                    tf.config.experimental.set_memory_growth(gpu, True)
-            except RuntimeError as e:
-                print(f"GPU setup error: {e}")
+def conventional_channel_estimation(signal_simulator, test_channel, test_sizes):
+    """
+    Test conventional channel estimation methods (Pure LS and MMSE)
+    
+    Args:
+        signal_simulator: Instance of signal_simulator class
+        test_channel: Channel type to test on (e.g., "WINNER")
+        test_sizes: List of test sample sizes
+        
+    Returns:
+        Dictionary containing performance results for Pure LS and MMSE methods
+    """
+    import numpy as np
+    import time
+    import os
+    from datetime import datetime
+    
+    print("\n=== Conventional Channel Estimation Baseline Test ===")
+    
+    # Initialize results dictionary
+    results = {
+        "Pure_LS": {},
+        "MMSE": {}
+    }
+    
+    # Create timestamp for the file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Ensure experiment_logs directory exists
+    if not os.path.exists("experiment_logs"):
+        os.makedirs("experiment_logs")
+    
+    # Create file for saving results
+    result_file = os.path.join("experiment_logs", f"conventional_channel_est_{test_channel}_{timestamp}.txt")
+    
+    # Initialize file with header information
+    with open(result_file, "w") as f:
+        f.write(f"Conventional Channel Estimation Results\n")
+        f.write(f"Test Channel: {test_channel}\n")
+        f.write(f"SNR: {signal_simulator.SNRdB} dB\n")
+        f.write(f"Timestamp: {timestamp}\n")
+        f.write("="*50 + "\n\n")
+        f.write("Sample Size\tPure LS BER\tMMSE BER\n")
+        f.write("-"*40 + "\n")
+    
+    # Test each sample size
+    for size in test_sizes:
+        print(f"\nSample size: {size}")
+        
+        # Generate test data
+        bits = signal_simulator.generate_bits(size)
+        
+        # Pure LS method test
+        start_time = time.time()
+        ber_pure_ls = test_pure_ls(signal_simulator, bits, test_channel)
+        ls_time = time.time() - start_time
+        print(f"Pure LS: BER = {ber_pure_ls:.6f}, Processing time: {ls_time:.2f}s")
+        results["Pure_LS"][size] = ber_pure_ls
+        
+        # MMSE method test
+        start_time = time.time()
+        ber_mmse = test_mmse(signal_simulator, bits, test_channel)
+        mmse_time = time.time() - start_time
+        print(f"MMSE: BER = {ber_mmse:.6f}, Processing time: {mmse_time:.2f}s")
+        results["MMSE"][size] = ber_mmse
+        
+        # Save results to file
+        with open(result_file, "a") as f:
+            f.write(f"{size}\t\t{ber_pure_ls:.6f}\t{ber_mmse:.6f}\n")
+    
+    # Add summary to file
+    with open(result_file, "a") as f:
+        
+        f.write("\nPerformance Summary:\n")
+        best_ls = min(results["Pure_LS"].values())
+        best_mmse = min(results["MMSE"].values())
+        best_overall = min(best_ls, best_mmse)
+        best_method = "Pure LS" if best_ls == best_overall else "MMSE"
+        
+        f.write(f"- Best Pure LS BER: {best_ls:.6f}\n")
+        f.write(f"- Best MMSE BER: {best_mmse:.6f}\n")
+        f.write(f"- Best Overall Method: {best_method} (BER: {best_overall:.6f})\n")
+    
+    print(f"\nResults saved to: {result_file}")
+    
+    # Print results summary to terminal
+    print("\n=== Conventional Channel Estimation Results Summary ===")
+    print("Sample Size\tPure LS BER\tMMSE BER")
+    print("-" * 40)
+    for size in sorted(test_sizes):
+        print(f"{size}\t\t{results['Pure_LS'][size]:.6f}\t{results['MMSE'][size]:.6f}")
+    
+    return results
 
-    # Import the experiment configuration system
-    from ExperimentConfig import ExperimentConfig, apply_config_to_simulator, create_meta_dnn_from_config
+
+def test_pure_ls(simulator, bits, channel_type):
+    """
+    Test BER using pure LS estimation method (without interpolation)
+    
+    Args:
+        simulator: signal_simulator instance
+        bits: Bits to transmit
+        channel_type: Channel type
+        
+    Returns:
+        Bit Error Rate (BER)
+    """
+    import numpy as np
+    
+    total_bits = len(bits) * simulator.payloadBits_per_OFDM
+    errors = 0
+    
+    for i, bit_sequence in enumerate(bits):
+        # Use existing code to generate signals
+        ofdm_tx = simulator.transmit_signals(bit_sequence)
+        ofdm_rx = simulator.received_signals(ofdm_tx, channel_type)
+        
+        # Remove cyclic prefix
+        ofdm_rx_no_cp = simulator.remove_cp(ofdm_rx)
+        
+        # FFT demodulation
+        ofdm_rx_freq = simulator.dft(ofdm_rx_no_cp)
+        
+        # 1. LS channel estimation at pilot positions
+        rx_pilots = ofdm_rx_freq[simulator.pilot_carriers]
+        pilot_value = globals()['pilot_value']
+        h_est_pilot = rx_pilots / pilot_value
+        
+        # 2. Use nearest pilot for data carriers (pure LS without interpolation)
+        h_est = np.zeros(simulator.K, dtype=complex)
+        pilot_carriers = simulator.pilot_carriers
+        
+        for k in range(simulator.K):
+            # Find nearest pilot position
+            distances = np.abs(pilot_carriers - k)
+            nearest_idx = np.argmin(distances)
+            h_est[k] = h_est_pilot[nearest_idx]
+        
+        # 3. Equalization
+        equalized_freq = ofdm_rx_freq / h_est
+        
+        # 4. Extract data carriers
+        equalized_data = equalized_freq[simulator.data_carriers]
+        
+        # 5. Demapping QAM symbols to bits
+        mapping_table = globals()['mapping_table']
+        constellation_points = np.array(list(mapping_table.values()))
+        demapping_table = {v: k for k, v in mapping_table.items()}
+        
+        detected_bits = []
+        for symbol in equalized_data:
+            # Find closest constellation point
+            distances = np.abs(symbol - constellation_points)
+            min_idx = np.argmin(distances)
+            closest_point = constellation_points[min_idx]
+            
+            # Get corresponding bits
+            bit_tuple = demapping_table[closest_point]
+            detected_bits.extend(bit_tuple)
+        
+        detected_bits = np.array(detected_bits)
+        
+        # Calculate errors
+        if len(detected_bits) == len(bit_sequence):
+            current_errors = np.sum(detected_bits != bit_sequence)
+            errors += current_errors
+        
+        # Print progress
+        if (i+1) % 10 == 0:
+            print(f"Processed {i+1}/{len(bits)} symbols", end="\r")
+    
+    # Calculate BER
+    ber = errors / total_bits
+    return ber
+
+
+def test_mmse(simulator, bits, channel_type):
+    """
+    Test BER using MMSE estimation method
+    
+    Args:
+        simulator: signal_simulator instance
+        bits: Bits to transmit
+        channel_type: Channel type
+        
+    Returns:
+        Bit Error Rate (BER)
+    """
+    import numpy as np
+    
+    total_bits = len(bits) * simulator.payloadBits_per_OFDM
+    errors = 0
+    
+    # Convert SNR to linear value
+    snr_linear = 10**(simulator.SNRdB/10)
+    
+    for i, bit_sequence in enumerate(bits):
+        # Use existing code to generate signals
+        ofdm_tx = simulator.transmit_signals(bit_sequence)
+        ofdm_rx = simulator.received_signals(ofdm_tx, channel_type)
+        
+        # Remove cyclic prefix
+        ofdm_rx_no_cp = simulator.remove_cp(ofdm_rx)
+        
+        # FFT demodulation
+        ofdm_rx_freq = simulator.dft(ofdm_rx_no_cp)
+        
+        # 1. LS channel estimation at pilot positions
+        rx_pilots = ofdm_rx_freq[simulator.pilot_carriers]
+        pilot_value = globals()['pilot_value']
+        h_est_pilot = rx_pilots / pilot_value
+        
+        # 2. Use nearest pilot for initial LS estimate (no interpolation)
+        h_ls = np.zeros(simulator.K, dtype=complex)
+        pilot_carriers = simulator.pilot_carriers
+        
+        for k in range(simulator.K):
+            # Find nearest pilot position
+            distances = np.abs(pilot_carriers - k)
+            nearest_idx = np.argmin(distances)
+            h_ls[k] = h_est_pilot[nearest_idx]
+        
+        # 3. Apply MMSE optimization
+        # Calculate noise variance
+        signal_power = np.mean(np.abs(h_ls)**2)
+        noise_var = signal_power / snr_linear
+        
+        # MMSE filter
+        h_mmse = h_ls * (np.abs(h_ls)**2 / (np.abs(h_ls)**2 + noise_var))
+        
+        # 4. Equalization
+        equalized_freq = ofdm_rx_freq / h_mmse
+        
+        # 5. Extract data carriers
+        equalized_data = equalized_freq[simulator.data_carriers]
+        
+        # 6. Demapping QAM symbols to bits
+        mapping_table = globals()['mapping_table']
+        constellation_points = np.array(list(mapping_table.values()))
+        demapping_table = {v: k for k, v in mapping_table.items()}
+        
+        detected_bits = []
+        for symbol in equalized_data:
+            # Find closest constellation point
+            distances = np.abs(symbol - constellation_points)
+            min_idx = np.argmin(distances)
+            closest_point = constellation_points[min_idx]
+            
+            # Get corresponding bits
+            bit_tuple = demapping_table[closest_point]
+            detected_bits.extend(bit_tuple)
+        
+        detected_bits = np.array(detected_bits)
+        
+        # Calculate errors
+        if len(detected_bits) == len(bit_sequence):
+            current_errors = np.sum(detected_bits != bit_sequence)
+            errors += current_errors
+        
+        # Print progress
+        if (i+1) % 10 == 0:
+            print(f"Processed {i+1}/{len(bits)} symbols", end="\r")
+    
+    # Calculate BER
+    ber = errors / total_bits
+    return ber
+
+def main():
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='OFDM Signal Detection with Configurable Test Channel')
+    parser.add_argument('--test_channel', type=str, default="WINNER", 
+                        choices=["awgn", "rician", "rayleigh", "WINNER"],
+                        help='Channel type for generalization testing (default: WINNER)')
+    parser.add_argument('--train_samples', type=int, default=64000,
+                        help='Number of training samples (default: 64000)')
+    parser.add_argument('--snr', type=float, default=10,
+                        help='Signal-to-noise ratio in dB (default: 10)')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducibility (default: 42)')
+    parser.add_argument('--early_stopping', action='store_true',
+                        help='Enable early stopping for meta-learning (disabled by default)')
+    args = parser.parse_args()
     
     # Create a fully integrated experiment configuration
     config = ExperimentConfig()
     
-    # Modify configuration parameters if needed (examples)
-    # config.config["global"]["K"] = 128  # Change number of subcarriers
-    config.config["dataset"]["train_samples"] = 64000
-    config.config["meta_dnn"]["early_stopping"]=False
-    # config.config["meta_dnn"]["abs_threshold"] = 0.01
+    # Set the generalization test channel
+    config.set_test_channel(args.test_channel)
+    
+    # Apply other command-line arguments to configuration
+    config.config["dataset"]["train_samples"] = args.train_samples
+    config.config["signal"]["SNR"] = args.snr
+    config.config["seed"] = args.seed
+    config.config["meta_dnn"]["early_stopping"] = args.early_stopping
     
     # Save configuration to record experiment settings
     experiment_time = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1947,11 +2115,32 @@ if __name__ == "__main__":
     # Inject global parameters into global namespace (replaces importing global_parameters module)
     config.inject_globals(globals())
     
+    # Get available training channels and inject into globals for signal_simulator
+    train_channels = config.get_available_training_channels()
+    globals()['available_channel_types'] = train_channels
+    
     # Set random seed for reproducibility
     seed = config.config["seed"]
     np.random.seed(seed)
     tf.random.set_seed(seed)
     
+    # Configure GPU memory growth to prevent TensorFlow from allocating all GPU memory at once
+    gpus = tf.config.list_physical_devices('GPU')
+    print("Available GPU devices:", gpus)
+    if gpus and config.config["gpu_memory_growth"]:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            from keras import mixed_precision
+            policy = mixed_precision.Policy('mixed_float16')
+            mixed_precision.set_global_policy(policy)
+            print("Mixed precision policy set to:", policy.name)
+    
+            # Disable XLA auto-compilation
+            os.environ["TF_XLA_FLAGS"] = "--tf_xla_auto_jit=0"
+            print("GPU memory growth enabled")
+        except RuntimeError as e:
+            print(f"GPU setup error: {e}")
     
     # Get dataset and training parameters from configuration
     dataset_params = config.get_dataset_params()
@@ -1964,35 +2153,76 @@ if __name__ == "__main__":
     DNN_batch_size = dnn_params["batch_size"]
     channel_types = dataset_params["channel_types"]
     meta_channel_types = dataset_params["meta_channel_types"]
+    test_channel = dataset_params["test_channel"]
     
     # Ensure output directory exists
     log_dir = output_params.get("log_dir", "experiment_logs")
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
     
+    # Print experiment configuration summary
+    print("\n=== Experiment Configuration ===")
+    print(f"Test Channel: {test_channel}")
+    print(f"Training Channels: {channel_types}")
+    print(f"Meta-learning Channels: {meta_channel_types}")
+    print(f"Training Samples: {DNN_samples}")
+    print(f"SNR: {config.config['signal']['SNR']} dB")
+    print(f"Random Seed: {seed}")
+    print(f"Early Stopping: {'Enabled' if config.config['meta_dnn']['early_stopping'] else 'Disabled'}")
+    
     # Create signal simulator instance
     simulator = signal_simulator()
     # All parameters already injected through global variables, just apply SNR
     simulator.SNRdB = config.config["signal"]["SNR"]
     
+    #conventional_channel_estimation(simulator, test_channel, [50,100,500,1000])
     # Initialize model and history containers
     models = {}
     histories = {}
     
     # Generate training data
-    print(f"Generating {DNN_samples} training samples...")
+    print(f"\nGenerating {DNN_samples} training samples...")
     bits = simulator.generate_bits(DNN_samples)
     MultiModelBCP.clear_data()
     
-    # Training Phase - Standard DNN
-    print("=== Train Phase ===")
+   # Training Phase - Standard DNN
+    print("\n=== Train Phase ===")
+
+    # Extract only individual channels (no mixed types) for use in mixed datasets
+    individual_channels = [ch for ch in channel_types 
+                        if ch != "random_mixed" and ch != "sequential_mixed"]
+    print(f"Individual channels available for mixing: {individual_channels}")
+
     for channel in channel_types:
         print(f"\nTraining on {channel} channel...")
         
         # Generate training data
         start_time = time.time()
-        x_train, y_train = simulator.generate_training_dataset(channel, bits)
-        x_test, y_test = simulator.generate_testing_dataset(channel, dataset_params["test_samples"] // 5)
+        
+        if channel == "random_mixed":
+            # For random_mixed, explicitly pass individual channels
+            print(f"Generating mixed dataset from individual channels: {individual_channels}")
+            x_train, y_train = simulator.generate_training_dataset(
+                "random_mixed",
+                bits,
+                mode="mixed_random",
+                custom_channels=individual_channels  # Explicitly pass channels to mix
+            )
+            
+            # Similarly for test dataset
+            x_test, y_test = simulator.generate_testing_dataset(
+                "random_mixed",
+                dataset_params["test_samples"] // 5,
+                mode="mixed_random",
+                custom_channels=individual_channels  # Explicitly pass channels to mix
+            )
+        else:
+            # Standard single-channel generation
+            x_train, y_train = simulator.generate_training_dataset(channel, bits)
+            x_test, y_test = simulator.generate_testing_dataset(channel, dataset_params["test_samples"] // 5)
+    
+
+        
         print(f"Data generation time: {time.time() - start_time:.2f} seconds")
         
         # Create model
@@ -2041,31 +2271,57 @@ if __name__ == "__main__":
     # Calculate meta-update iterations, matching DNN
     total_meta_iteration = int((DNN_samples/DNN_batch_size)*DNN_epoch)
     print(f"Meta-update iterations: {total_meta_iteration}")
-    
+
+    # Get explicit list of individual channels for meta-learning (no random_mixed)
+    meta_channel_types = config.config["dataset"]["meta_channel_types"]
+    print(f"Using channels for meta-learning: {meta_channel_types}")
+
     # Generate meta-learning tasks for each channel type
     print("Generating meta-learning tasks...")
     start_time = time.time()
     for channel in meta_channel_types:
         channel_bits = simulator.generate_bits(DNN_samples)
-        x_task, y_task = simulator.generate_training_dataset(channel, channel_bits)
+        
+        # Use direct channel, don't rely on available_channel_types global
+        x_task, y_task = simulator.generate_training_dataset(
+            channel,  # Passing single channel directly
+            channel_bits
+        )
         meta_tasks.append((x_task, y_task))
         # Free memory immediately
         gc.collect()
     print(f"Meta-learning task generation time: {time.time() - start_time:.2f} seconds")
+
+    # Create validation set - use a mix of individual channels (not random_mixed)
+    # This ensures consistent validation - each channel has equal representation
+    print("Creating meta-learning validation set...")
+    meta_val_samples = dataset_params["test_samples"] // 5
+    meta_val_samples_per_channel = meta_val_samples // len(meta_channel_types)
+
+    meta_x_val_parts = []
+    meta_y_val_parts = []
+
+    for channel in meta_channel_types:
+        x_val_part, y_val_part = simulator.generate_testing_dataset(
+            channel,  # Single channel
+            meta_val_samples_per_channel
+        )
+        meta_x_val_parts.append(x_val_part)
+        meta_y_val_parts.append(y_val_part)
+
+    # Combine all parts
+    meta_x_test = np.concatenate(meta_x_val_parts, axis=0)
+    meta_y_test = np.concatenate(meta_y_val_parts, axis=0)
+
+    print(f"Validation set created with {len(meta_x_test)} samples from {meta_channel_types}")
     
-    # Create meta-learning model
+    print("Creating Meta-DNN model...")
     models[meta_model_name] = create_meta_dnn_from_config(
         input_dim=meta_tasks[0][0].shape[1],
         payloadBits_per_OFDM=simulator.payloadBits_per_OFDM,
         config=config
     )
-    
-    # Create validation set
-    meta_x_test, meta_y_test = simulator.generate_testing_dataset(
-        "random_mixed", 
-        dataset_params["test_samples"] // 5
-    )
-    
+
     # Train meta-model
     print("Starting meta-learning training...")
     start_time = time.time()
@@ -2095,8 +2351,8 @@ if __name__ == "__main__":
     del losses, val_errs, update_counts, meta_x_test, meta_y_test, meta_tasks
     gc.collect()
     
-    # WINNER II Generalization Test Phase
-    print("\n=== WINNER II Generalization Test Phase ===")
+    # Generalization Test Phase
+    print(f"\n=== {test_channel} Generalization Test Phase ===")
     MultiModelBCP.clear_data()
     
     # Get fine-tuning parameters
@@ -2104,39 +2360,38 @@ if __name__ == "__main__":
     val_parameter_set = []
     for size in dataset_params["fine_tuning_sizes"]:
         batch_size = fine_tuning_params["batch_sizes"].get(str(size), 32)
-        val_epoch = fine_tuning_params["epochs"].get(str(size), 32)
-        val_parameter_set.append((size,val_epoch, batch_size))
+        val_epoch = fine_tuning_params["epochs"].get(str(size), 1)
+        val_parameter_set.append((size, val_epoch, batch_size))
     
-    # Create validation set
-    x_WINNER_val, y_WINNER_val = simulator.generate_testing_dataset(
-        dataset_params["test_channel"], 
+    # Create validation set for test channel
+    x_test_val, y_test_val = simulator.generate_testing_dataset(
+        test_channel, 
         dataset_params["test_samples"] // 8
     )
-    val_epoch = fine_tuning_params["epochs"]
     
-    for size, val_epoch,val_batch_size in val_parameter_set:
+    for size, val_epoch, val_batch_size in val_parameter_set:
         DNN_num_update = int((size/val_batch_size)*val_epoch)
-        print(f"{size} sample set, updates: {DNN_num_update}")
+        print(f"\n{size} sample set, updates: {DNN_num_update}")
         
-        # Generate WINNER training data
+        # Generate test channel training data
         bits_array = simulator.generate_bits(size)
-        x_WINNER_train, y_WINNER_train = simulator.generate_training_dataset(
-            dataset_params["test_channel"], 
+        x_test_train, y_test_train = simulator.generate_training_dataset(
+            test_channel, 
             bits_array
         )
         
         # Convert to TensorFlow dataset
         train_dataset = create_tf_dataset(
-            x_WINNER_train, y_WINNER_train, 
+            x_test_train, y_test_train, 
             batch_size=val_batch_size,
             repeat=False
         )
         
         # Traditional DNN fine-tuning
         for channel in channel_types:
-            model_name = f"DNN_{channel}_WINNER_{size}"
+            model_name = f"DNN_{channel}_{test_channel}_{size}"
             dnn_model = models[f"DNN_{channel}"].clone()
-            print(f"\nValidating {channel} channel, sample size: {size}")
+            print(f"Fine-tuning {channel} model on {test_channel} channel, sample size: {size}")
             
             callback = MultiModelBCP(
                 model_name=model_name, 
@@ -2148,7 +2403,7 @@ if __name__ == "__main__":
             dnn_model.fit(
                 train_dataset,
                 epochs=val_epoch,
-                validation_data=(x_WINNER_val, y_WINNER_val),
+                validation_data=(x_test_val, y_test_val),
                 callbacks=[callback],
                 verbose=1
             )
@@ -2158,7 +2413,7 @@ if __name__ == "__main__":
             gc.collect()
         
         # Meta DNN fine-tuning
-        meta_task_WINNER = [(x_WINNER_train, y_WINNER_train)]
+        meta_task = [(x_test_train, y_test_train)]
         meta_model = models["Meta_DNN"].clone()
         meta_model_name = f"Meta_{size}"
         
@@ -2166,9 +2421,9 @@ if __name__ == "__main__":
         task_steps = min(config.config["meta_dnn"]["task_steps"], size//5)
         
         losses, val_errs, update_counts = meta_model.train_reptile(
-            meta_task_WINNER, 
+            meta_task, 
             meta_epochs=DNN_num_update, 
-            meta_validation_data=(x_WINNER_val, y_WINNER_val),
+            meta_validation_data=(x_test_val, y_test_val),
             task_steps=task_steps
         )
         
@@ -2177,18 +2432,19 @@ if __name__ == "__main__":
             losses,
             val_errs,
             update_counts=update_counts,
-            dataset_type=f"WINNER_{size}"
+            dataset_type=f"{test_channel}_{size}"
         )
         
         # Free meta-model and data
-        del meta_model, losses, val_errs, update_counts, meta_task_WINNER
-        del x_WINNER_train, y_WINNER_train, train_dataset
+        del meta_model, losses, val_errs, update_counts, meta_task
+        del x_test_train, y_test_train, train_dataset
         gc.collect()
     
     # Plot final results
-    final_plot_file = os.path.join(log_dir, f"WINNER_generalization_test_{experiment_time}.png")
+    final_plot_file = os.path.join(log_dir, f"{test_channel}_generalization_test_{experiment_time}.png")
     MultiModelBCP.plot_by_updates(save_path=final_plot_file, dpi=dpi)
 
+    # Prepare export directory
     output_dir = f"matlab_exports/experiment_{experiment_time}"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -2197,16 +2453,17 @@ if __name__ == "__main__":
     print("\n=== Exporting Model Data to MATLAB ===")
     exported_files = MultiModelBCP.export_data_for_matlab(
         output_dir=output_dir,
-        format="mat",
-        prefix=f"ofdm_models_{experiment_time}_"
+        prefix=f"ofdm_models_{test_channel}_{experiment_time}_"
     )
 
     # Generate MATLAB analysis script
     matlab_script = MultiModelBCP.generate_matlab_script(
         output_dir=output_dir,
         exported_files=exported_files,
-        prefix=f"ofdm_models_{experiment_time}_",
-        sample_sizes=dataset_params["fine_tuning_sizes"]
+        prefix=f"ofdm_models_{test_channel}_{experiment_time}_",
+        sample_sizes=dataset_params["fine_tuning_sizes"],
+        testing_channel=test_channel,
+        training_channels=channel_types,
     )
 
     print(f"\nData export complete! Results saved in: {output_dir}")
@@ -2221,3 +2478,6 @@ if __name__ == "__main__":
     print(f"Global parameters file: {global_params_path}")
     print(f"Update comparison chart: {plot_file}")
     print(f"Generalization test chart: {final_plot_file}")
+
+if __name__ == "__main__":
+    main()

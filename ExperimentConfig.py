@@ -4,7 +4,7 @@ import pprint
 import json
 import numpy as np
 import importlib
-from singal_detection_withOFDM import MetaDNN
+
 
 class ExperimentConfig:
     """Configuration management class for OFDM signal detection experiments - Fully integrated version"""
@@ -49,10 +49,11 @@ class ExperimentConfig:
                 "train_samples": 64000,                                   # Number of training samples
                 "test_samples": 2500,                                     # Test dataset size
                 "val_samples": 300,                                       # 3GPP validation dataset size
-                "channel_types": ["awgn", "rician", "rayleigh", "random_mixed"], # Standard training channels
-                "meta_channel_types": ["awgn", "rician", "rayleigh"],      # Meta-learning channels
-                "test_channel": "WINNER",                                   # Generalization test channel
-                "fine_tuning_sizes": [50, 100, 500, 1000, 64000]          # Fine-tuning sample sizes
+                "all_channel_types": ["awgn", "rician", "rayleigh", "WINNER","random_mixed"], # All available channel types
+                "channel_types": ["awgn", "rician", "rayleigh", "WINNER"], # Standard training channels (will be adjusted based on test_channel)
+                "meta_channel_types": ["awgn", "rician", "rayleigh"],     # Meta-learning channels (will be adjusted based on test_channel)
+                "test_channel": "WINNER",                                 # Generalization test channel
+                "fine_tuning_sizes": [50, 100, 500, 1000,64000]          # Fine-tuning sample sizes
             },
             
             # DNN model parameters
@@ -122,6 +123,42 @@ class ExperimentConfig:
         
         # Calculate demapping table
         self._update_demapping_table()
+        # Update channel types based on test channel
+        self._update_channel_types()
+    
+    def _update_channel_types(self):
+        """
+        Updates the channel_types and meta_channel_types based on the selected test_channel.
+        
+        For DNN training:
+        - Includes all individual channels except the test channel
+        - Adds 'random_mixed' to train on a mixture of all available channels
+        
+        For Meta-learning:
+        - Includes only individual channels without 'random_mixed'
+        """
+        test_channel = self.config["dataset"]["test_channel"]
+        all_channels = self.config["dataset"]["all_channel_types"]
+        
+        # Create base training channel types by excluding test channel
+        base_train_channels = [ch for ch in all_channels if ch.lower() != test_channel.lower() 
+                            and ch.lower() != "random_mixed"]
+        
+        # For standard DNN, include both individual channels and random_mixed
+        dnn_train_channels = base_train_channels.copy()
+        if "random_mixed" not in dnn_train_channels:
+            dnn_train_channels.append("random_mixed")
+        
+        # For meta-learning, only use individual channels (no random_mixed)
+        meta_train_channels = base_train_channels.copy()
+        
+        # Update channel types
+        self.config["dataset"]["channel_types"] = dnn_train_channels
+        self.config["dataset"]["meta_channel_types"] = meta_train_channels
+        
+        print(f"Updated configuration: using {test_channel} as test channel")
+        print(f"DNN training channels: {dnn_train_channels}")
+        print(f"Meta-learning channels: {meta_train_channels}")
     
     def _complex_to_dict(self, complex_val):
         """
@@ -219,6 +256,18 @@ class ExperimentConfig:
         update_nested_dict(self.config, config_dict)
         # Update demapping table
         self._update_demapping_table()
+        # Update channel types based on test channel
+        self._update_channel_types()
+    
+    def set_test_channel(self, test_channel):
+        """
+        Set the generalization test channel and update training channels accordingly.
+        
+        Args:
+            test_channel: Channel type to use for generalization testing
+        """
+        self.config["dataset"]["test_channel"] = test_channel
+        self._update_channel_types()
     
     def get_simulator_params(self):
         """
@@ -281,6 +330,20 @@ class ExperimentConfig:
             Dictionary of output parameters
         """
         return self.config["output"]
+        
+    def get_available_training_channels(self):
+        """
+        Get available channel types for training (excluding test channel)
+        
+        Returns:
+            List of channel types available for training
+        """
+        test_channel = self.config["dataset"]["test_channel"]
+        all_channels = self.config["dataset"]["all_channel_types"]
+        
+        # Create training channel types by excluding test channel
+        train_channels = [ch for ch in all_channels if ch.lower() != test_channel.lower()]
+        return train_channels
     
     def create_global_module(self):
         """
@@ -548,6 +611,8 @@ def create_meta_dnn_from_config(input_dim, payloadBits_per_OFDM, config):
     Returns:
         Configured MetaDNN model
     """
+    from singal_detection_withOFDM import MetaDNN 
+    
     meta_params = config.get_meta_dnn_params()
     lr_schedule = meta_params.get("lr_schedule", {})
     
@@ -573,6 +638,9 @@ def create_meta_dnn_from_config(input_dim, payloadBits_per_OFDM, config):
 if __name__ == "__main__":
     # Create default configuration
     config = ExperimentConfig()
+    
+    # Example: Change test channel
+    config.set_test_channel("rician")
     
     # Modify configuration
     config.config["global"]["K"] = 128  # Change number of subcarriers
